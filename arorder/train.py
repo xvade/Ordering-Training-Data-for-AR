@@ -69,6 +69,10 @@ class TrainConfig:
     pool_mult: float = 2.0          # candidates per step as a multiple of batch_size
     select_start_epoch: float = 0.0  # selection is uniform before this epoch
     sampler_args: str = "{}"        # JSON keyword arguments for the scorer
+    # which weights the scorer sees: "raw" (the training iterate) or "ema" (the
+    # weight average; needs ema_decay > 0). The average is where single-update
+    # effects reflect the slow drift rather than the iterate's oscillation.
+    score_weights: str = "raw"
     # exponential moving average of the weights (0 disables). The average sits near
     # the floor of the loss valley that the raw iterate oscillates across, so it
     # is the less noisy place to measure a model; it is evaluated alongside the raw
@@ -261,7 +265,7 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
         lr = lr_at(step, cfg, steps_per_epoch, total_steps)
         for group in opt.param_groups:
             group["lr"] = lr
-        idx = sampler.next_batch(step, model)
+        idx = sampler.next_batch(step, ema if (cfg.score_weights == "ema" and ema is not None) else model)
         x, y = data.train.batch(idx, augment=cfg.augment, generator=gen)
         model.train()
         logits = model(x.contiguous(memory_format=torch.channels_last))

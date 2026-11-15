@@ -240,6 +240,13 @@ class ProbeGradientScorer:
     * ``mode="tilt"``:  ``<g_i, unit(g_clean) + lam * unit(r)>``: clean progress
       tilted towards robustness. ``lam = 0`` is ``clean``; large ``lam``
       approaches ``rob``.
+    * ``mode="linr"``:  ``<g_i, grad(-R)>`` with ``R`` the mean linearised
+      boundary distance of the held-out points (see
+      :meth:`arorder.robustness.ProbeEvaluator.lin_radius_gradient`). ``R`` is
+      unchanged by rescaling the logits, so this target cannot be satisfied by
+      becoming less confident. No attack is run.
+    * ``mode="linr_rob"``: the same with the clean-loss gradient projected out.
+    * ``mode="linr_tilt"``: ``<g_i, unit(g_clean) + lam * unit(grad(-R))>``.
 
     ``source`` says where the two gradients are measured: ``"probe"`` (held-out
     probe points, refreshed every ``refresh_every`` steps) or ``"pool"`` (the
@@ -255,7 +262,8 @@ class ProbeGradientScorer:
     def __init__(self, probe, eps: float = 2.0, pgd_steps: int = 5, probe_batch: int = 1000,
                  refresh_every: int = 10, mode: str = "rob", lam: float = 1.0, source: str = "probe",
                  seed: int = 0):
-        assert mode in ("adv", "clean", "gap", "rob", "tilt") and source in ("probe", "pool")
+        assert mode in ("adv", "clean", "gap", "rob", "tilt", "linr", "linr_rob", "linr_tilt")
+        assert source in ("probe", "pool")
         self.lam, self.source = lam, source
         self.probe, self.eps, self.pgd_steps = probe, eps / 255, pgd_steps
         self.probe_batch, self.refresh_every, self.mode = min(probe_batch, len(probe)), refresh_every, mode
@@ -267,14 +275,30 @@ class ProbeGradientScorer:
         grads = torch.autograd.grad(F.cross_entropy(model(x), y), params)
         return torch.cat([g.reshape(-1) for g in grads])
 
+    @staticmethod
+    def _linr_grad(model, x, y):
+        from .robustness import ProbeEvaluator  # local import avoids a cycle at module load
+        return ProbeEvaluator(x, y, [], steps=0, batch_size=len(x)).lin_radius_gradient(model)
+
     def refresh(self, model, x=None, y=None) -> None:
         """Recompute the scoring direction on ``(x, y)``, or on a fresh random probe mini-batch."""
         if x is None:
             idx = torch.randperm(len(self.probe), generator=self.gen)[: self.probe_batch].to(self.probe.device)
             x, y = self.probe.batch(idx)
+        if self.mode == "linr":
+            self.direction = self._linr_grad(model, x, y)
+            return
         g_clean = self._flat_grad(model, x, y)
         if self.mode == "clean":
             self.direction = g_clean
+            return
+        if self.mode in ("linr_rob", "linr_tilt"):
+            g_lin = self._linr_grad(model, x, y)
+            if self.mode == "linr_rob":
+                self.direction = g_lin - (g_lin @ g_clean) / (g_clean @ g_clean).clamp_min(1e-30) * g_clean
+            else:
+                self.direction = (g_clean / g_clean.norm().clamp_min(1e-30)
+                                  + self.lam * g_lin / g_lin.norm().clamp_min(1e-30))
             return
         g_adv = self._flat_grad(model, pgd_linf(model, x, y, self.eps, steps=self.pgd_steps, keep_best=False), y)
         if self.mode == "adv":
