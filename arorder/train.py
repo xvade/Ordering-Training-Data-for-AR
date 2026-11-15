@@ -41,7 +41,7 @@ import torch
 import torch.nn.functional as F
 
 from .attacks import pgd_linf
-from .data import DataBundle, load_cifar10
+from .data import DataBundle, load_dataset
 from .models import build_model
 from .robustness import ProbeEvaluator
 
@@ -51,6 +51,7 @@ class TrainConfig:
     """Configuration of one training run. Radii are in units of 1/255."""
 
     run_dir: str = "runs/debug"
+    dataset: str = "cifar10"  # name of a prepared dataset, see arorder.data.load_dataset
     # model
     model: str = "smallcnn"
     width: int = 32
@@ -240,7 +241,7 @@ class Trainer:
         torch.manual_seed(cfg.seed)
         np.random.seed(cfg.seed)
         torch.backends.cudnn.benchmark = True
-        self.data = data = data or load_cifar10(dev)
+        self.data = data = data or load_dataset(cfg.dataset, dev)
         self.model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
         self.model = self.model.to(memory_format=torch.channels_last)
         self.opt = make_optimizer(self.model, cfg)

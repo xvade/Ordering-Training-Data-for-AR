@@ -65,7 +65,7 @@ import torch.nn.functional as F
 from torch.func import functional_call, grad, vmap
 
 from .attacks import pgd_linf
-from .data import load_cifar10
+from .data import load_dataset
 from .models import build_model, flat_params, set_flat_params
 from .robustness import ProbeEvaluator
 from .train import TrainConfig, environment_info, load_checkpoint, lr_at
@@ -241,7 +241,7 @@ def investigate_checkpoint(
     """
     dev = torch.device("cuda")
     cfg = TrainConfig(**json.loads((Path(run_dir) / "config.json").read_text()))
-    data = load_cifar10(dev)
+    data = load_dataset(cfg.dataset, dev)
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
     ckpt_name = "ckpt_final.pt" if step < 0 else f"ckpt_{step:06d}.pt"
     ckpt = load_checkpoint(Path(run_dir) / ckpt_name, map_location=dev)

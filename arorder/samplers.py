@@ -141,12 +141,15 @@ class PoolFilterSampler:
 # --------------------------------------------------------------------------- gradient matching
 
 
-def per_sample_gradient_matrix(model, x, y, chunk: int = 128) -> torch.Tensor:
+def per_sample_gradient_matrix(model, x, y, chunk: int = 128, coords: torch.Tensor | None = None) -> torch.Tensor:
     """``(N, P)`` matrix whose row ``i`` is the flat loss gradient of sample ``i``.
 
-    Uses ``torch.func`` per-sample gradients; memory is ``N * P`` floats, so
-    this is for small models and pools of a few hundred samples. The model must
-    be in eval mode (per-sample gradients of train-mode BatchNorm are undefined).
+    Uses ``torch.func`` per-sample gradients. With ``coords`` (a LongTensor of
+    parameter positions) only those coordinates are kept, chunk by chunk, so
+    memory is ``N * len(coords)`` floats plus one chunk of full gradients; a few
+    thousand random coordinates are enough for gradient matching (JOURNAL.md,
+    2026-11-15). The model must be in eval mode (per-sample gradients of
+    train-mode BatchNorm are undefined).
     """
     names = [n for n, p in model.named_parameters() if p.requires_grad]
     params = {n: p.detach() for n, p in model.named_parameters() if p.requires_grad}
@@ -159,7 +162,8 @@ def per_sample_gradient_matrix(model, x, y, chunk: int = 128) -> torch.Tensor:
     rows = []
     for s in range(0, x.shape[0], chunk):
         g = per_sample(params, x[s : s + chunk], y[s : s + chunk])
-        rows.append(torch.cat([g[n].flatten(1) for n in names], dim=1))
+        flat = torch.cat([g[n].flatten(1) for n in names], dim=1)
+        rows.append(flat if coords is None else flat[:, coords])
     return torch.cat(rows)
 
 
@@ -178,6 +182,50 @@ def nonneg_least_squares(K: torch.Tensor, b: torch.Tensor, iters: int = 300) -> 
         z = w_new + (tk - 1) / tk_new * (w_new - w)
         w, tk = w_new, tk_new
     return w
+
+
+def project_capped_simplex(v: torch.Tensor, total: float, cap: float, iters: int = 40) -> torch.Tensor:
+    """Euclidean projection of ``v`` onto ``{w : 0 <= w_i <= cap, sum(w) = total}`` (bisection on the shift)."""
+    lo, hi = (v.min() - cap).item(), v.max().item()
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        if (v - mid).clamp(0, cap).sum() > total:
+            lo = mid
+        else:
+            hi = mid
+    return (v - (lo + hi) / 2).clamp(0, cap)
+
+
+def capped_direction_fit(K: torch.Tensor, b: torch.Tensor, t_norm: float, total: float, cap: float,
+                         iters: int = 100, scales=(1.0, 2.0, 4.0)) -> torch.Tensor:
+    """Weights ``0 <= w_i <= cap`` with ``sum(w) = total`` whose combination best matches a direction.
+
+    ``K = G G^T`` and ``b = G t`` describe candidate gradients ``G`` and the
+    target ``t``. For a target length ``alpha`` the problem
+    ``min_w || G^T w - alpha * t / ||t|| ||^2`` over the capped simplex is
+    solved by projected gradient; the length is unknown (only the direction
+    matters), so a few lengths, multiples ``scales`` of the length of the
+    uniform combination, are tried and the solution with the highest cosine
+    to ``t`` is returned.
+
+    With ``total = batch size`` and ``cap = 1`` the weights are inclusion
+    probabilities of a batch *without repeats*; a larger cap allows a sample to
+    appear up to ``cap`` times.
+    """
+    n = len(b)
+    step = 1.0 / torch.linalg.eigvalsh(K)[-1].clamp_min(1e-30)
+    w_uniform = torch.full_like(b, total / n)
+    ref = (w_uniform @ K @ w_uniform).clamp_min(1e-30).sqrt()  # length of the uniform combination
+    b_hat = b / max(t_norm, 1e-30)                              # G t / ||t||
+    best, best_cos = w_uniform, (b_hat @ w_uniform / ref).item()
+    for c in scales:
+        alpha, w = c * ref, w_uniform.clone()
+        for _ in range(iters):
+            w = project_capped_simplex(w - step * (K @ w - alpha * b_hat), total, cap)
+        cosine = (b_hat @ w / (w @ K @ w).clamp_min(1e-30).sqrt()).item()
+        if cosine > best_cos:
+            best, best_cos = w, cosine
+    return best
 
 
 def systematic_counts(w: torch.Tensor, n: int, generator: torch.Generator | None = None) -> torch.Tensor:
@@ -220,6 +268,12 @@ class GradientMatchSampler:
     direction. Motivation and the measured quality of the approximation are in
     JOURNAL.md (2026-11-15, "gradient matching").
 
+    ``max_repeat`` bounds how often one candidate may appear in a batch
+    (``1`` = a batch of distinct samples; ``0`` = unbounded). Unbounded fits put
+    most weight on a few dozen candidates; over a run the same samples are then
+    trained on again and again, the rest of the data is neglected, and both the
+    match and the model degrade (JOURNAL.md, 2026-11-15, run ``p7_gm/gm_e8``).
+
     Unlike rules that keep the top-scoring candidates by an inner product, the
     fit matches a *direction*: it is not rewarded for picking large gradients,
     which is what made earlier gradient-guided rules collapse or stall.
@@ -234,7 +288,8 @@ class GradientMatchSampler:
 
     def __init__(self, data, probe, batch_size: int, pool_mult: float = 4.0, eps: float = 8.0, pgd_steps: int = 5,
                  mix: float = 1.0, target: str = "train", target_n: int = 256, nnls_iters: int = 200,
-                 start_step: int = 0, seed: int = 0):
+                 max_repeat: float = 0.0, n_coords: int = 0, grad_chunk: int = 128, start_step: int = 0,
+                 seed: int = 0):
         assert target in ("train", "probe")
         self.data, self.probe, self.batch_size = data, probe, batch_size
         self.n_candidates = int(round(pool_mult * batch_size))
@@ -242,6 +297,10 @@ class GradientMatchSampler:
         self.pool_size = self.n_candidates + (target_n if target == "train" else 0)
         self.eps, self.pgd_steps, self.mix = eps / 255, pgd_steps, mix
         self.target, self.target_n, self.nnls_iters, self.start_step = target, target_n, nnls_iters, start_step
+        self.max_repeat = max_repeat
+        # n_coords > 0: fit on that many randomly chosen gradient coordinates (fixed for the run) instead of
+        # all of them, which bounds memory for large models; grad_chunk = samples per per-sample-gradient call
+        self.n_coords, self.grad_chunk, self._coords = n_coords, grad_chunk, None
         self.base = UniformSampler(len(data), self.pool_size, seed=seed, device=data.device)
         self.gen = torch.Generator(device="cpu").manual_seed(seed + 1)
         self._stats: dict = {}
@@ -273,9 +332,16 @@ class GradientMatchSampler:
         model.eval()
         t = self.target_direction(model, *self.data.batch(target_idx)) if self.target == "train" \
             else self.target_direction(model)
-        G = per_sample_gradient_matrix(model, x, y)
+        if self.n_coords and self._coords is None:
+            self._coords = torch.randperm(len(t), generator=self.gen)[: self.n_coords].sort().values.to(t.device)
+        G = per_sample_gradient_matrix(model, x, y, chunk=self.grad_chunk, coords=self._coords)
+        if self._coords is not None:
+            t = t[self._coords]  # the fit and the logged cosines then live in the reduced space
         model.train(was_training)
-        w = nonneg_least_squares(G @ G.T, G @ t, iters=self.nnls_iters)
+        if self.max_repeat > 0:  # diversity constraint: no candidate more than max_repeat times in the batch
+            w = capped_direction_fit(G @ G.T, G @ t, t.norm().item(), float(self.batch_size), self.max_repeat)
+        else:
+            w = nonneg_least_squares(G @ G.T, G @ t, iters=self.nnls_iters)
         if not torch.isfinite(w).all() or w.sum() <= 0:  # no usable fit: fall back to a uniform batch
             self._stats = {}
             return pool[: self.batch_size]

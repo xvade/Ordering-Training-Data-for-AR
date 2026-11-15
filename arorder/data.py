@@ -68,6 +68,25 @@ def prepare_cifar10(raw_tar: Path, out_path: Path) -> None:
     np.savez(out_path, x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test)
 
 
+def prepare_cifar100(raw_tar: Path, out_path: Path) -> None:
+    """Convert the official ``cifar-100-python.tar.gz`` into one ``.npz`` file (fine labels, 100 classes).
+
+    Same layout as :func:`prepare_cifar10`.
+    """
+    arrays = {}
+    with tarfile.open(raw_tar, "r:gz") as tar:
+        for member in tar.getmembers():
+            name = Path(member.name).name
+            if name not in ("train", "test"):
+                continue
+            batch = pickle.load(tar.extractfile(member), encoding="bytes")  # official archive, checksum verified by caller
+            arrays[f"x_{name}"] = np.asarray(batch[b"data"], dtype=np.uint8).reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+            arrays[f"y_{name}"] = np.asarray(batch[b"fine_labels"], dtype=np.int64)
+    assert arrays["x_train"].shape == (50000, 32, 32, 3) and arrays["x_test"].shape == (10000, 32, 32, 3)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out_path, **arrays)
+
+
 @dataclass
 class Splits:
     """Index arrays (into the official training set) for the three roles."""
@@ -154,20 +173,24 @@ class DataBundle:
     num_classes: int
 
 
-def load_cifar10(
+def load_dataset(
+    name: str,
     device: torch.device | str,
     data_dir: Path = DEFAULT_DATA_DIR,
     n_probe: int = 2000,
     n_val: int = 3000,
     split_seed: int = 0,
 ) -> DataBundle:
-    """Load prepared CIFAR-10 onto ``device`` with the fixed train/probe/val split.
+    """Load a prepared dataset (``<name>.npz`` in ``data_dir``) with the fixed train/probe/val split.
 
-    ``train.x[k]`` is official training image ``splits.train[k]``; all logged
-    sample indices in this project are positions within ``train`` (0..44999)
-    unless stated otherwise.
+    Any dataset stored in the layout written by :func:`prepare_cifar10`
+    (``x_train``, ``y_train``, ``x_test``, ``y_test``; uint8 NHWC images) works;
+    ``cifar10`` and ``cifar100`` are prepared by ``scripts/prepare_cifar10.py``
+    and ``scripts/prepare_cifar100.py``. ``train.x[k]`` is official training
+    image ``splits.train[k]``; all logged sample indices in this project are
+    positions within ``train`` unless stated otherwise.
     """
-    d = np.load(Path(data_dir) / "cifar10.npz")
+    d = np.load(Path(data_dir) / f"{name}.npz")
     full = GPUData(d["x_train"], d["y_train"], device)
     splits = make_splits(len(full), n_probe=n_probe, n_val=n_val, seed=split_seed)
     return DataBundle(
@@ -176,5 +199,10 @@ def load_cifar10(
         val=full.subset(splits.val),
         test=GPUData(d["x_test"], d["y_test"], device),
         splits=splits,
-        num_classes=10,
+        num_classes=int(d["y_train"].max()) + 1,
     )
+
+
+def load_cifar10(device, data_dir: Path = DEFAULT_DATA_DIR, **kw) -> DataBundle:
+    """CIFAR-10 with the fixed split (see :func:`load_dataset`)."""
+    return load_dataset("cifar10", device, data_dir, **kw)

@@ -339,3 +339,45 @@ def test_gradient_match_batch_is_closer_to_target_than_uniform(tmp_path, tiny_da
     assert len(draw) == 4 * 32 + 64 and set(idx.tolist()) <= set(draw[:128].tolist())
     # projecting onto the cone of candidate gradients cannot be further from the target than their plain mean
     assert st["sel/cos_fit"] >= st["sel/cos_uniform"] - 1e-3
+
+
+def test_project_capped_simplex_satisfies_constraints():
+    from arorder.samplers import project_capped_simplex
+
+    v = torch.randn(50, generator=torch.Generator().manual_seed(0)) * 3
+    w = project_capped_simplex(v, total=10.0, cap=1.0)
+    assert w.min() >= 0 and w.max() <= 1 + 1e-6 and w.sum().item() == pytest.approx(10.0, abs=1e-3)
+    # a point already in the set is left where it is
+    inside = torch.full((50,), 0.2)
+    assert torch.allclose(project_capped_simplex(inside, 10.0, 1.0), inside, atol=1e-4)
+
+
+def test_capped_fit_improves_on_uniform_and_respects_cap():
+    from arorder.samplers import capped_direction_fit, systematic_counts
+
+    torch.manual_seed(0)
+    G = torch.randn(64, 300, device=DEV)
+    t = G[:8].sum(0) + 0.1 * torch.randn(300, device=DEV)  # a direction that 8 of the candidates point along
+    K, b = G @ G.T, G @ t
+    w = capped_direction_fit(K, b, t.norm().item(), total=16.0, cap=1.0)
+    assert w.min() >= 0 and w.max() <= 1 + 1e-5 and w.sum().item() == pytest.approx(16.0, abs=1e-2)
+    cos = lambda w_: (b @ w_ / ((w_ @ K @ w_).sqrt() * t.norm())).item()
+    assert cos(w) > cos(torch.full_like(w, 16 / 64)) + 0.1
+    counts = systematic_counts(w.cpu(), 16, torch.Generator().manual_seed(0))
+    assert counts.sum() == 16 and counts.max() <= 1  # a batch of distinct samples
+
+
+def test_gradient_match_with_coordinate_subset(tmp_path, tiny_data):
+    from arorder.samplers import GradientMatchSampler, per_sample_gradient_matrix
+    from arorder.train import Trainer
+
+    t = Trainer(_tiny_cfg(tmp_path), data=tiny_data)
+    model = t.model.eval()
+    x, y = tiny_data.train.batch(torch.arange(16, device=DEV))
+    full = per_sample_gradient_matrix(model, x, y)
+    coords = torch.tensor([0, 5, 100, 2000], device=DEV)
+    assert torch.allclose(per_sample_gradient_matrix(model, x, y, chunk=5, coords=coords), full[:, coords], atol=1e-6)
+    s = GradientMatchSampler(tiny_data.train, tiny_data.probe, batch_size=32, pool_mult=4, eps=8.0, pgd_steps=2,
+                             target_n=64, n_coords=512, max_repeat=1, seed=0)
+    idx = s.next_batch(0, t.model)
+    assert len(idx) == 32 and len(set(idx.tolist())) == 32 and len(s._coords) == 512

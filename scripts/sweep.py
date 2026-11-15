@@ -19,7 +19,7 @@ from pathlib import Path
 
 import torch
 
-from arorder.data import load_cifar10
+from arorder.data import load_dataset
 from arorder.train import TrainConfig, train
 
 
@@ -49,10 +49,14 @@ if __name__ == "__main__":
     p.add_argument("--variants", nargs="+", required=True)
     p.add_argument("--common", default="", help="overrides applied to every variant, same syntax")
     a = p.parse_args()
-    data = load_cifar10(torch.device("cuda"))
+    bundles = {}  # datasets are loaded once and shared by all runs that use them
     _, common = parse_variant("common:" + a.common)
     for spec in a.variants:
         name, over = parse_variant(spec)
+        dataset = {**common, **over}.get("dataset", TrainConfig().dataset)
+        if dataset not in bundles:
+            bundles[dataset] = load_dataset(dataset, torch.device("cuda"))
+        data = bundles[dataset]
         for seed in a.seeds:
             run_dir = a.out_root / name / f"seed{seed}"
             if (run_dir / "meta.json").exists():

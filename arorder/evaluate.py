@@ -28,7 +28,7 @@ from pathlib import Path
 import torch
 
 from .attacks import margin, pgd_linf
-from .data import load_cifar10
+from .data import load_dataset
 from .models import build_model
 from .train import TrainConfig, environment_info, load_checkpoint
 
@@ -59,7 +59,7 @@ def evaluate_checkpoint(run_dir: Path, split: str = "val", eps_list=(1.0, 2.0, 4
     """Evaluate ``run_dir/ckpt`` on ``split`` (``val`` or ``test``); radii in 1/255."""
     dev = torch.device("cuda")
     cfg = TrainConfig(**json.loads((Path(run_dir) / "config.json").read_text()))
-    data = load_cifar10(dev)
+    data = load_dataset(cfg.dataset, dev)
     ds = getattr(data, split)
     x, y = ds.batch(torch.arange(len(ds), device=dev))
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
