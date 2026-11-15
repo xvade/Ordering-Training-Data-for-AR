@@ -55,17 +55,24 @@ def worst_case_margins(model, x, y, eps: float, steps: int = 50, restarts: int =
 
 
 def evaluate_checkpoint(run_dir: Path, split: str = "val", eps_list=(1.0, 2.0, 4.0, 8.0), steps: int = 50,
-                        restarts: int = 3, autoattack: bool = False, ckpt: str = "ckpt_final.pt") -> dict:
-    """Evaluate ``run_dir/ckpt`` on ``split`` (``val`` or ``test``); radii in 1/255."""
+                        restarts: int = 3, autoattack: bool = False, ckpt: str = "ckpt_final.pt",
+                        weights: str = "raw") -> dict:
+    """Evaluate ``run_dir/ckpt`` on ``split`` (``val`` or ``test``); radii in 1/255.
+
+    ``weights="ema"`` evaluates the weight average stored in the checkpoint
+    (runs trained with ``ema_decay > 0``). The result is written to
+    ``eval_<split>.json`` for the final raw weights and to
+    ``eval_<split>_<ckpt stem>_<weights>.json`` otherwise.
+    """
     dev = torch.device("cuda")
     cfg = TrainConfig(**json.loads((Path(run_dir) / "config.json").read_text()))
     data = load_dataset(cfg.dataset, dev)
     ds = getattr(data, split)
     x, y = ds.batch(torch.arange(len(ds), device=dev))
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
-    model.load_state_dict(load_checkpoint(Path(run_dir) / ckpt, map_location=dev)["model"])
+    model.load_state_dict(load_checkpoint(Path(run_dir) / ckpt, map_location=dev)["ema" if weights == "ema" else "model"])
     model.eval()
-    res = {"split": split, "n": len(ds), "clean_acc": (_margins(model, x, y, 1000) > 0).float().mean().item(),
+    res = {"split": split, "n": len(ds), "ckpt": ckpt, "weights": weights, "clean_acc": (_margins(model, x, y, 1000) > 0).float().mean().item(),
            "attack": f"worst case over {restarts} restarts x (CE, margin) PGD-{steps}", "env": environment_info()}
     for e in eps_list:
         m = worst_case_margins(model, x, y, e / 255, steps=steps, restarts=restarts)
@@ -79,7 +86,9 @@ def evaluate_checkpoint(run_dir: Path, split: str = "val", eps_list=(1.0, 2.0, 4
             adversary = AutoAttack(model, norm="Linf", eps=e / 255, version="standard", verbose=False)
             xa = adversary.run_standard_evaluation(x, y, bs=1000)
             res[f"autoattack_acc@{e:g}"] = (_margins(model, xa, y, 1000) > 0).float().mean().item()
-    (Path(run_dir) / f"eval_{split}.json").write_text(json.dumps(res, indent=1))
+    default = ckpt == "ckpt_final.pt" and weights == "raw"
+    name = f"eval_{split}.json" if default else f"eval_{split}_{Path(ckpt).stem}_{weights}.json"
+    (Path(run_dir) / name).write_text(json.dumps(res, indent=1))
     return res
 
 
@@ -91,6 +100,8 @@ if __name__ == "__main__":
     p.add_argument("--steps", type=int, default=50)
     p.add_argument("--restarts", type=int, default=3)
     p.add_argument("--autoattack", action="store_true")
+    p.add_argument("--ckpt", default="ckpt_final.pt")
+    p.add_argument("--weights", default="raw", choices=["raw", "ema"])
     a = p.parse_args()
-    out = evaluate_checkpoint(a.run_dir, a.split, a.eps, a.steps, a.restarts, a.autoattack)
+    out = evaluate_checkpoint(a.run_dir, a.split, a.eps, a.steps, a.restarts, a.autoattack, a.ckpt, a.weights)
     print(json.dumps({k: v for k, v in out.items() if k != "env"}, indent=1))
