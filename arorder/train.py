@@ -65,7 +65,8 @@ class TrainConfig:
     augment: bool = True
     seed: int = 0
     # data ordering: "uniform" (baseline shuffling), "class_balanced" (every batch
-    # has equal class counts), or a scorer name understood by
+    # has equal class counts), "grad_match" (clean samples whose combined gradient
+    # matches the adversarial-training direction), or a scorer name understood by
     # arorder.samplers.build_scorer (e.g. "loss:low"), applied by PoolFilterSampler
     sampler: str = "uniform"
     pool_mult: float = 2.0          # candidates per step as a multiple of batch_size
@@ -278,13 +279,18 @@ class Trainer:
     # ------------------------------------------------------------------ batches
 
     def _make_sampler(self, seed: int):
-        from .samplers import ClassBalancedSampler, PoolFilterSampler, UniformSampler, build_scorer
+        from .samplers import (ClassBalancedSampler, GradientMatchSampler, PoolFilterSampler, UniformSampler,
+                               build_scorer)
 
         cfg, n = self.cfg, len(self.data.train)
         if cfg.sampler == "uniform":
             return UniformSampler(n, cfg.batch_size, seed=seed, device=self.dev)
         if cfg.sampler == "class_balanced":
             return ClassBalancedSampler(self.data.train.y, cfg.batch_size, seed=seed, device=self.dev)
+        start = int(cfg.select_start_epoch * self.steps_per_epoch)
+        if cfg.sampler == "grad_match":
+            return GradientMatchSampler(self.data.train, self.data.probe, cfg.batch_size, pool_mult=cfg.pool_mult,
+                                        start_step=start, seed=seed, **json.loads(cfg.sampler_args))
         scorer = build_scorer(cfg.sampler, data=self.data, **json.loads(cfg.sampler_args))
         return PoolFilterSampler(self.data.train, cfg.batch_size, cfg.pool_mult, scorer,
                                  start_step=int(cfg.select_start_epoch * self.steps_per_epoch), seed=seed)

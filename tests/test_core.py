@@ -299,3 +299,43 @@ def test_adversarial_training_step_runs_and_changes_weights(tmp_path, tiny_data)
     before = flat_params(t.model).clone()
     t.train_step()
     assert not torch.equal(flat_params(t.model), before)
+
+
+def test_nonneg_least_squares_recovers_a_nonnegative_combination():
+    from arorder.samplers import nonneg_least_squares
+
+    torch.manual_seed(0)
+    G = torch.randn(20, 200, device=DEV)
+    w_true = torch.zeros(20, device=DEV)
+    w_true[[1, 5, 9]] = torch.tensor([0.5, 1.0, 2.0], device=DEV)
+    t = w_true @ G
+    w = nonneg_least_squares(G @ G.T, G @ t, iters=2000)
+    assert (w >= 0).all() and torch.allclose(w @ G, t, atol=1e-2 * t.norm().item())
+
+
+def test_systematic_counts_sum_and_track_weights():
+    from arorder.samplers import systematic_counts
+
+    w = torch.tensor([0.0, 1.0, 3.0, 0.5, 0.0, 5.5])
+    c = systematic_counts(w, 40, torch.Generator().manual_seed(0))
+    assert c.sum() == 40 and (c[w == 0] == 0).all()
+    assert ((c.float() - 40 * w / w.sum()).abs() < 1).all()
+
+
+def test_gradient_match_batch_is_closer_to_target_than_uniform(tmp_path, tiny_data):
+    from arorder.samplers import GradientMatchSampler
+    from arorder.train import Trainer
+
+    t = Trainer(_tiny_cfg(tmp_path), data=tiny_data)
+    for _ in range(3):
+        t.train_step()
+    s = GradientMatchSampler(tiny_data.train, tiny_data.probe, batch_size=32, pool_mult=4, eps=8.0, pgd_steps=2,
+                             target_n=64, seed=0)
+    idx = s.next_batch(0, t.model)
+    st = s.stats()
+    assert len(idx) == 32
+    # candidates and target samples are disjoint parts of one draw; the batch comes from the candidates
+    draw = GradientMatchSampler(tiny_data.train, tiny_data.probe, 32, 4, target_n=64, seed=0).base.next_batch(0)
+    assert len(draw) == 4 * 32 + 64 and set(idx.tolist()) <= set(draw[:128].tolist())
+    # projecting onto the cone of candidate gradients cannot be further from the target than their plain mean
+    assert st["sel/cos_fit"] >= st["sel/cos_uniform"] - 1e-3

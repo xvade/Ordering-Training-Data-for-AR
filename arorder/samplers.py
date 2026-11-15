@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from torch.func import functional_call, jvp
+from torch.func import functional_call, grad, jvp, vmap
 
 from .attacks import margin, pgd_linf
 
@@ -133,6 +133,162 @@ class PoolFilterSampler:
         keep = scores.topk(self.batch_size).indices
         self._stats = {"sel/score_kept": scores[keep].mean().item(), "sel/score_pool": scores.mean().item()}
         return pool[keep]
+
+    def stats(self) -> dict:
+        return self._stats
+
+
+# --------------------------------------------------------------------------- gradient matching
+
+
+def per_sample_gradient_matrix(model, x, y, chunk: int = 128) -> torch.Tensor:
+    """``(N, P)`` matrix whose row ``i`` is the flat loss gradient of sample ``i``.
+
+    Uses ``torch.func`` per-sample gradients; memory is ``N * P`` floats, so
+    this is for small models and pools of a few hundred samples. The model must
+    be in eval mode (per-sample gradients of train-mode BatchNorm are undefined).
+    """
+    names = [n for n, p in model.named_parameters() if p.requires_grad]
+    params = {n: p.detach() for n, p in model.named_parameters() if p.requires_grad}
+    buffers = dict(model.named_buffers())
+
+    def loss_one(p, xi, yi):
+        return F.cross_entropy(functional_call(model, (p, buffers), (xi[None],)), yi[None])
+
+    per_sample = vmap(grad(loss_one), in_dims=(None, 0, 0))
+    rows = []
+    for s in range(0, x.shape[0], chunk):
+        g = per_sample(params, x[s : s + chunk], y[s : s + chunk])
+        rows.append(torch.cat([g[n].flatten(1) for n in names], dim=1))
+    return torch.cat(rows)
+
+
+def nonneg_least_squares(K: torch.Tensor, b: torch.Tensor, iters: int = 300) -> torch.Tensor:
+    """``argmin_{w >= 0} w^T K w - 2 b^T w`` by accelerated projected gradient.
+
+    With ``K = G G^T`` and ``b = G t`` this is the non-negative combination of
+    the rows of ``G`` closest to ``t``.
+    """
+    lip = torch.linalg.eigvalsh(K)[-1].clamp_min(1e-30)
+    w = torch.zeros_like(b)
+    z, tk = w.clone(), 1.0
+    for _ in range(iters):
+        w_new = (z - (K @ z - b) / lip).clamp_min(0)
+        tk_new = (1 + (1 + 4 * tk * tk) ** 0.5) / 2
+        z = w_new + (tk - 1) / tk_new * (w_new - w)
+        w, tk = w_new, tk_new
+    return w
+
+
+def systematic_counts(w: torch.Tensor, n: int, generator: torch.Generator | None = None) -> torch.Tensor:
+    """Integer counts summing to ``n`` with expectation ``n * w / w.sum()`` (systematic resampling).
+
+    Each count differs from its expectation by less than one, so the resulting
+    multiset reproduces the weighted combination with little sampling noise.
+    """
+    p = w / w.sum()
+    u = torch.rand(1, generator=generator).item() if generator is not None else 0.5
+    edges = torch.cumsum(p, 0) * n
+    edges[-1] = n  # guard against rounding
+    upper = torch.floor(edges - u + 1).clamp(0, n)
+    return (upper - torch.cat([upper.new_zeros(1), upper[:-1]])).long()
+
+
+class GradientMatchSampler:
+    """Choose clean samples whose combined gradient points along the adversarial-training gradient.
+
+    Adversarial training updates the weights along ``t``, the gradient of the
+    loss at attacked inputs. This sampler never trains on an attacked input.
+    Each step it
+
+    1. draws ``pool_mult * batch_size`` candidate training samples;
+    2. measures the target direction ``t = (1 - mix) * g_clean + mix * g_adv`` on
+       ``target_n`` *other* samples, where ``g_adv`` is the loss gradient at PGD
+       inputs of radius ``eps`` (in 1/255). With ``target="train"`` these are
+       further training samples drawn for the purpose (no held-out data
+       needed); with ``target="probe"`` they come from the held-out probe
+       split. Target samples are never candidates: a sample's clean gradient is
+       trivially close to its own adversarial gradient, and fitting that
+       would match the target's sampling noise instead of its direction;
+    3. computes every candidate's clean loss gradient ``g_i`` and solves
+       ``min_{w >= 0} || sum_i w_i g_i - t ||``;
+    4. returns a batch in which candidate ``i`` appears about
+       ``batch_size * w_i / sum(w)`` times.
+
+    The update the trainer then makes is an ordinary step on (repeated) clean
+    training samples whose mean gradient approximates the adversarial-training
+    direction. Motivation and the measured quality of the approximation are in
+    JOURNAL.md (2026-11-15, "gradient matching").
+
+    Unlike rules that keep the top-scoring candidates by an inner product, the
+    fit matches a *direction*: it is not rewarded for picking large gradients,
+    which is what made earlier gradient-guided rules collapse or stall.
+
+    Statistics logged per step (``sel/...``): ``cos_fit`` (cosine between the
+    weighted combination and ``t``), ``cos_batch`` (the same for the batch
+    actually returned), ``cos_uniform_batch`` (for a plain batch of the same
+    size: the fair reference), ``cos_uniform`` (for the mean of all
+    candidates), ``norm_ratio`` (norm of the batch's mean gradient relative to a plain
+    batch's), ``eff_n`` (effective number of distinct samples in the batch).
+    """
+
+    def __init__(self, data, probe, batch_size: int, pool_mult: float = 4.0, eps: float = 8.0, pgd_steps: int = 5,
+                 mix: float = 1.0, target: str = "train", target_n: int = 256, nnls_iters: int = 200,
+                 start_step: int = 0, seed: int = 0):
+        assert target in ("train", "probe")
+        self.data, self.probe, self.batch_size = data, probe, batch_size
+        self.n_candidates = int(round(pool_mult * batch_size))
+        # with target="train" each draw holds the candidates followed by the target samples
+        self.pool_size = self.n_candidates + (target_n if target == "train" else 0)
+        self.eps, self.pgd_steps, self.mix = eps / 255, pgd_steps, mix
+        self.target, self.target_n, self.nnls_iters, self.start_step = target, target_n, nnls_iters, start_step
+        self.base = UniformSampler(len(data), self.pool_size, seed=seed, device=data.device)
+        self.gen = torch.Generator(device="cpu").manual_seed(seed + 1)
+        self._stats: dict = {}
+
+    @staticmethod
+    def _flat_grad(model, x, y):
+        params = [p for p in model.parameters() if p.requires_grad]
+        grads = torch.autograd.grad(F.cross_entropy(model(x), y), params)
+        return torch.cat([g.reshape(-1) for g in grads])
+
+    def target_direction(self, model, x=None, y=None) -> torch.Tensor:
+        """Target direction measured on ``(x, y)``, or on a random probe mini-batch if not given."""
+        if x is None:
+            idx = torch.randperm(len(self.probe), generator=self.gen)[: self.target_n].to(self.probe.device)
+            x, y = self.probe.batch(idx)
+        g_adv = self._flat_grad(model, pgd_linf(model, x, y, self.eps, steps=self.pgd_steps, keep_best=False), y)
+        if self.mix >= 1:
+            return g_adv
+        return (1 - self.mix) * self._flat_grad(model, x, y) + self.mix * g_adv
+
+    def next_batch(self, step: int, model=None) -> torch.Tensor:
+        draw = self.base.next_batch(step)
+        pool, target_idx = draw[: self.n_candidates], draw[self.n_candidates :]
+        if step < self.start_step:
+            self._stats = {}
+            return pool[: self.batch_size]
+        x, y = self.data.batch(pool)
+        was_training = model.training
+        model.eval()
+        t = self.target_direction(model, *self.data.batch(target_idx)) if self.target == "train" \
+            else self.target_direction(model)
+        G = per_sample_gradient_matrix(model, x, y)
+        model.train(was_training)
+        w = nonneg_least_squares(G @ G.T, G @ t, iters=self.nnls_iters)
+        if not torch.isfinite(w).all() or w.sum() <= 0:  # no usable fit: fall back to a uniform batch
+            self._stats = {}
+            return pool[: self.batch_size]
+        counts = systematic_counts(w.cpu(), self.batch_size, self.gen).to(pool.device)
+        cf = counts.float()
+        mean_pool, fit, batch = G.mean(0), w @ G, cf @ G / self.batch_size
+        cos = lambda a: (a @ t / (a.norm() * t.norm()).clamp_min(1e-30)).item()
+        uniform_batch = G[: self.batch_size].mean(0)  # what a plain batch of the same size would give
+        self._stats = {"sel/cos_fit": cos(fit), "sel/cos_batch": cos(batch), "sel/cos_uniform": cos(mean_pool),
+                       "sel/cos_uniform_batch": cos(uniform_batch),
+                       "sel/norm_ratio": (batch.norm() / uniform_batch.norm().clamp_min(1e-30)).item(),
+                       "sel/eff_n": (cf.sum() ** 2 / (cf ** 2).sum()).item()}
+        return torch.repeat_interleave(pool, counts)
 
     def stats(self) -> dict:
         return self._stats
