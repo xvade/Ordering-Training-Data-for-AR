@@ -142,3 +142,107 @@ What the per-update log shows (probe split, 1000 points, PGD-5):
 Consequence for the method: because harm is a small systematic bias under large
 symmetric noise, a selection rule has to shift the *average direction* of
 updates; removing rare outlier batches cannot be the mechanism.
+
+## 2026-11-15 11:27-12:10 PST — Single-update study at raw iterates (epochs 0.33-6), first sweeps, weight averaging
+
+Hardware: g3026/g3030-g3033, Quadro RTX 6000, 4 CPUs per job. Jobs: replay study
+43270749-50 and 43271337-39 (`arorder.investigate` on `base_gn_s0`); sweeps 43271007
+(A), 43271008 (B), 43271300 (C) into `ordering-ar-runs/p2a`; averaged baseline 43272742
+(`base_ema_s0`). Tables: `results/phase1/investigate/`, `results/p2a/`.
+
+### A. One-step replay at raw training iterates (checkpoints at epochs 0.33, 1, 2, 4, 6)
+
+Setup: pure gradient steps of 0.25 x lr from the checkpoint; effect measured on val
+(3000 points, PGD-10, fixed starts). Per-sample first-order gains for all 45,000
+train samples.
+
+1. **First-order reasoning is reliable at this step size.** Predicted vs measured
+   change of val adversarial loss on random batches: R^2 0.95-0.99 at 0.25 x lr,
+   0.98-1.00 at 0.0625 x lr, 0.17-0.79 at 1 x lr. Scores computed on `probe`
+   predict the effect on `val` (R^2 0.95-0.99); even the "robustness-only"
+   direction (adversarial gradient with the clean gradient projected out) agrees
+   between probe and val (cosine 0.97-0.99).
+2. **There is no separate population of robustness-harming samples.** A sample's
+   effect on held-out adversarial loss and on held-out clean loss are almost the
+   same ranking (Spearman 0.97-0.999). Only 0.6-4% of samples lower clean loss
+   while raising adversarial loss. 23-45% of samples raise *both*.
+3. **One-step effects are dominated by transient class imbalance.** The class
+   label alone explains 76% of the variance of the clean gain at epoch 0.33, 40%
+   at epoch 1 and 19-29% at epochs 2-6 (40-80% for the direction, i.e. gain
+   divided by gradient norm), and 11-44% of the robustness-only gain. Which
+   classes help flips between checkpoints (rank correlation of per-sample clean
+   gains between epoch 0.33 and epoch 1 is -0.70). At a given moment the iterate
+   over-predicts some classes; training on those classes hurts, training on the
+   others helps, and the roles rotate.
+4. **The robustness-only gain is not a stable property of a sample.** No
+   intrinsic feature (loss, margin, gradient norm, boundary distance, own
+   adversarial margin) predicts it (|Spearman| < 0.25), and its rank correlation
+   between checkpoints ranges from -0.28 to 0.64.
+5. **A pure gradient step from a trajectory point looks far better than what
+   training achieves.** At epoch 6 a random-batch step of 0.25 x lr lowers val
+   clean loss by 0.20 and adversarial loss by 0.34; a whole epoch of training
+   moves clean loss by about 0.1. The iterate sits on the wall of a sharp valley
+   and a small step slides it back towards the floor. One-step attribution at a
+   raw iterate therefore mostly measures this fast transverse motion, not the
+   slow drift along the valley that changes robustness over epochs.
+6. **Loss-based robustness targets do not move robust accuracy consistently.**
+   With step length equalised, keeping the half of a pool preferred by the
+   robustness-only gain lowers "adversarial loss at matched clean loss" at every
+   checkpoint (z about -20), but its effect on accuracy under attack at matched
+   clean accuracy changes sign from checkpoint to checkpoint (+0.002, -0.005,
+   +0.005, -0.003) and on the linearised radius likewise.
+
+### B. First full-training sweeps (3 seeds each, 20 epochs unless noted, val split, raw weights)
+
+| variant | clean | @2/255 | @4/255 | AUC |
+|---|---|---|---|---|
+| base | 0.795 +- 0.004 | 0.167 +- 0.019 | 0.014 | 1.14 +- 0.06 |
+| base, 10 epochs | 0.704 +- 0.007 | 0.218 +- 0.032 | 0.034 | 1.22 +- 0.11 |
+| base, 5 epochs | 0.593 +- 0.003 | 0.314 +- 0.012 | 0.113 | 1.58 +- 0.05 |
+| keep lowest-loss half of each 256 pool | 0.522 +- 0.031 | 0.251 +- 0.013 | 0.075 | 1.26 +- 0.08 |
+| keep highest-loss half | 0.815 +- 0.006 | 0.109 +- 0.012 | 0.006 | 0.99 +- 0.04 |
+| keep largest boundary-distance half | 0.525 +- 0.032 | 0.262 +- 0.018 | 0.078 | 1.30 +- 0.07 |
+| keep smallest boundary-distance half | 0.822 +- 0.005 | 0.112 +- 0.012 | 0.005 | 1.00 +- 0.03 |
+| keep middle half by boundary distance | 0.727 +- 0.004 | 0.193 +- 0.021 | 0.022 | 1.15 +- 0.06 |
+| keep best half by robustness-only gain (probe) | 0.475 +- 0.037 | 0.283 +- 0.009 | 0.143 | 1.52 +- 0.03 |
+
+* Easy-sample rules give a more robust but much less accurate model; hard-sample
+  rules the reverse. This is the same axis as training shorter or longer.
+* **Easy-sample selection is dominated by simply training the baseline for 5
+  epochs** (0.593 clean / 1.58 AUC against 0.52 / 1.26-1.30). Any claim for a
+  selection rule has to be made against the baseline's whole
+  accuracy-robustness curve, not against the 20-epoch baseline alone.
+* The robustness-only rule collapsed the model to chance within one epoch of
+  being switched on (a constant predictor is trivially "robust") before partly
+  recovering. Selection has ample leverage over the update direction; used
+  without a constraint on clean progress it is destructive.
+
+### C. Weight averaging (`base_ema_s0`, EMA decay 0.99, same seed as base)
+
+| epoch | raw clean | raw @2 | raw AUC | EMA clean | EMA @2 | EMA AUC |
+|---|---|---|---|---|---|---|
+| 2 | 0.402 | 0.269 | 1.54 | 0.468 | 0.316 | 1.76 |
+| 4 | 0.547 | 0.305 | 1.59 | 0.571 | 0.349 | 1.86 |
+| 6 | 0.558 | 0.254 | 1.30 | 0.653 | 0.320 | 1.60 |
+| 10 | 0.680 | 0.218 | 1.21 | 0.731 | 0.245 | 1.32 |
+| 14 | 0.770 | 0.198 | 1.20 | 0.780 | 0.219 | 1.26 |
+| 20 | 0.798 | 0.176 | 1.16 | 0.799 | 0.176 | 1.16 |
+
+* The averaged weights are both more accurate and more robust than the raw
+  iterate while the learning rate is high: the oscillation costs both.
+* The rise-then-decay of robustness is still there in the averaged weights
+  (accuracy at 2/255 peaks at 0.349 in epoch 4 and ends at 0.176), so the decay
+  is a real drift of the solution and not an artefact of the oscillation.
+* Decision: study single updates at the averaged weights (no transverse
+  component), and judge selection rules on averaged weights as well as raw.
+
+### Bugs found and fixed
+
+* Checkpoints written after warm-up contained a numpy scalar (the learning rate)
+  and could not be loaded with `torch.load(weights_only=True)`; three replay jobs
+  failed after 24 s. Fixed at the source (`lr_at` returns a Python float) and
+  `load_checkpoint` falls back for the legacy files.
+* `scripts/env.sh` did not export `PY`, so `bash -c '$PY ...'` ran an empty
+  command. Exported.
+* A unit test demanded bit-identical repeated PGD evaluations; cuDNN is not
+  bit-reproducible, so it failed once in a while. Now uses a tolerance.
