@@ -4,11 +4,27 @@ The trainer calls ``sampler.next_batch(step, model)`` once per optimiser step
 and trains on whatever positions (within the train split) come back. This is the
 single seam through which a data-ordering method acts, so a selection rule is
 independent of the model, the loss and the dataset.
+
+Two samplers are provided:
+
+* :class:`UniformSampler` - ordinary shuffling (the baseline);
+* :class:`PoolFilterSampler` - draws ``pool_mult`` times more candidates than
+  needed, scores them with the current model, and keeps the best. The number of
+  optimiser steps is unchanged, so comparisons against the baseline are at an
+  equal update budget (the extra cost is the scoring pass).
+
+Scores are produced by *scorers*: callables ``scorer(model, x, y, step) ->
+Tensor[N]`` where a higher score means "prefer to train on this sample".
+:func:`build_scorer` constructs the registered ones by name.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
+from torch.func import functional_call, jvp
+
+from .attacks import margin, pgd_linf
 
 
 class UniformSampler:
@@ -26,3 +42,168 @@ class UniformSampler:
         idx = self._perm[self._pos : self._pos + self.batch_size]
         self._pos += self.batch_size
         return idx
+
+    def stats(self) -> dict:
+        """Scalars describing the most recent selection (logged per step)."""
+        return {}
+
+
+class PoolFilterSampler:
+    """Keep the ``batch_size`` best-scoring samples out of a uniform candidate pool.
+
+    Args:
+        data: the train split (a :class:`arorder.data.GPUData`).
+        batch_size: number of samples trained on per step.
+        pool_mult: candidates drawn per step, as a multiple of ``batch_size``.
+            ``keep_frac = 1 / pool_mult`` of candidates are trained on.
+        scorer: ``scorer(model, x, y, step) -> Tensor[N]``, higher = preferred.
+        start_step: before this step the sampler behaves uniformly (selection
+            rules that rely on the model are meaningless at initialisation).
+        seed: seed of the candidate stream.
+
+    Candidates are scored on un-augmented images with the model in eval mode;
+    the trainer applies augmentation afterwards.
+    """
+
+    def __init__(self, data, batch_size: int, pool_mult: float, scorer, start_step: int = 0, seed: int = 0):
+        self.data, self.batch_size, self.scorer, self.start_step = data, batch_size, scorer, start_step
+        self.pool_size = int(round(pool_mult * batch_size))
+        self.base = UniformSampler(len(data), self.pool_size, seed=seed, device=data.device)
+        self._stats: dict = {}
+
+    def next_batch(self, step: int, model=None) -> torch.Tensor:
+        pool = self.base.next_batch(step)
+        if step < self.start_step or self.pool_size == self.batch_size:
+            self._stats = {}
+            return pool[: self.batch_size]
+        x, y = self.data.batch(pool)
+        was_training = model.training
+        model.eval()
+        scores = self.scorer(model, x, y, step)
+        model.train(was_training)
+        keep = scores.topk(self.batch_size).indices
+        self._stats = {"sel/score_kept": scores[keep].mean().item(), "sel/score_pool": scores.mean().item()}
+        return pool[keep]
+
+    def stats(self) -> dict:
+        return self._stats
+
+
+# --------------------------------------------------------------------------- scorers
+
+
+def directional_derivatives(model, x, y, vectors: torch.Tensor) -> torch.Tensor:
+    """``out[i, k] = <grad_theta loss_i, vectors[k]>`` via forward-mode differentiation.
+
+    One forward-mode pass per direction gives the product for every sample in
+    the batch at once, without materialising per-sample gradients. Cost is a few
+    forward passes per direction.
+    """
+    names = [n for n, p in model.named_parameters() if p.requires_grad]
+    params = {n: p.detach() for n, p in model.named_parameters() if p.requires_grad}
+    buffers = dict(model.named_buffers())
+    shapes = [params[n].shape for n in names]
+    sizes = [params[n].numel() for n in names]
+
+    def f(p):
+        return F.cross_entropy(functional_call(model, (p, buffers), (x,)), y, reduction="none")
+
+    out = []
+    for v in vectors:
+        tangents = {n: t.view(s) for n, t, s in zip(names, v.split(sizes), shapes)}
+        out.append(jvp(f, (params,), (tangents,))[1])
+    return torch.stack(out, dim=1)
+
+
+@torch.no_grad()
+def _logits(model, x):
+    return model(x)
+
+
+def score_loss(model, x, y, step):
+    """Per-sample cross-entropy loss."""
+    return F.cross_entropy(_logits(model, x), y, reduction="none")
+
+
+def score_margin(model, x, y, step):
+    """Per-sample classification margin."""
+    return margin(_logits(model, x), y)
+
+
+def score_lin_radius(model, x, y, step):
+    """First-order L-inf distance of each sample to the decision boundary (pixel units)."""
+    x = x.clone().requires_grad_(True)
+    m = margin(model(x), y)
+    (g,) = torch.autograd.grad(m.sum(), x)
+    return m.detach() / g.abs().flatten(1).sum(1).clamp_min(1e-12)
+
+
+class AdvMarginScorer:
+    """The sample's own margin after a short PGD attack at radius ``eps`` (in 1/255)."""
+
+    def __init__(self, eps: float = 2.0, steps: int = 3):
+        self.eps, self.steps = eps / 255, steps
+
+    def __call__(self, model, x, y, step):
+        xa = pgd_linf(model, x, y, self.eps, steps=self.steps, keep_best=False)
+        return margin(_logits(model, xa), y)
+
+
+class Negated:
+    """Wrap a scorer so that *low* raw scores are preferred."""
+
+    def __init__(self, scorer):
+        self.scorer = scorer
+
+    def __call__(self, model, x, y, step):
+        return -self.scorer(model, x, y, step)
+
+
+class Band:
+    """Prefer samples whose raw score is closest to a target quantile of the pool.
+
+    ``q = 0.5`` keeps the middle of the pool and drops both extremes.
+    """
+
+    def __init__(self, scorer, q: float = 0.5):
+        self.scorer, self.q = scorer, q
+
+    def __call__(self, model, x, y, step):
+        s = self.scorer(model, x, y, step)
+        ranks = s.argsort().argsort().float() / max(len(s) - 1, 1)
+        return -(ranks - self.q).abs()
+
+
+_BASE_SCORERS = {
+    "loss": lambda **kw: score_loss,
+    "margin": lambda **kw: score_margin,
+    "lin_radius": lambda **kw: score_lin_radius,
+    "adv_margin": lambda **kw: AdvMarginScorer(**kw),
+}
+
+
+def build_scorer(name: str, **kw):
+    """Build a scorer from a name such as ``"loss:low"``, ``"margin:high"`` or ``"loss:band"``.
+
+    The part before the colon picks the quantity (``loss``, ``margin``,
+    ``lin_radius``, ``adv_margin``); the part after picks which end of the pool
+    is kept: ``high``, ``low`` or ``band`` (closest to pool quantile ``q``,
+    default the median). Extra keyword arguments go to the quantity's scorer.
+    """
+    base_name, _, mode = name.partition(":")
+    q = kw.pop("q", 0.5)
+    if base_name not in _BASE_SCORERS:
+        raise ValueError(f"unknown scorer {base_name!r}; known: {sorted(_BASE_SCORERS)}")
+    base = _BASE_SCORERS[base_name](**kw)
+    if mode in ("", "high"):
+        return base
+    if mode == "low":
+        return Negated(base)
+    if mode == "band":
+        return Band(base, q)
+    raise ValueError(f"unknown mode {mode!r} in scorer {name!r}")
+
+
+def register_scorer(name: str, factory) -> None:
+    """Register an additional base scorer factory under ``name``."""
+    _BASE_SCORERS[name] = factory

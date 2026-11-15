@@ -13,6 +13,7 @@ from arorder.data import make_splits, random_crop_flip
 from arorder.investigate import batch_gradient, per_sample_gradient_products
 from arorder.models import build_model, flat_params, set_flat_params
 from arorder.robustness import ProbeEvaluator
+from arorder.samplers import Band, PoolFilterSampler, build_scorer, directional_derivatives, score_loss
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -125,3 +126,40 @@ def test_probe_evaluator_is_paired_and_consistent(toy):
     assert a["adv_acc@2"] <= a["adv_acc@1"] <= a["clean_acc"]
     assert a["adv_loss@2"] >= a["adv_loss@1"] >= a["clean_loss"]
     assert 0 <= a["auc"] <= 2
+
+
+def test_directional_derivatives_match_per_sample_gradients(toy):
+    model, x, y = toy
+    V = torch.randn(2, flat_params(model).numel(), device=DEV)
+    dots, _ = per_sample_gradient_products(model, x, y, V)
+    assert torch.allclose(directional_derivatives(model, x, y, V), dots, rtol=1e-3, atol=1e-4)
+
+
+def test_pool_filter_keeps_best_scoring_candidates(toy):
+    model, x, y = toy
+
+    class Data:  # minimal stand-in for GPUData
+        device = DEV
+
+        def __len__(self):
+            return len(x)
+
+        def batch(self, idx, augment=False, generator=None):
+            return x[idx], y[idx]
+
+    sampler = PoolFilterSampler(Data(), batch_size=6, pool_mult=2, scorer=build_scorer("loss:low"), seed=0)
+    idx = sampler.next_batch(0, model)
+    assert len(idx) == 6 and len(set(idx.tolist())) == 6
+    # Reconstruct the pool the sampler drew and check the kept ones have the lowest loss.
+    ref = PoolFilterSampler(Data(), batch_size=6, pool_mult=2, scorer=None, seed=0).base.next_batch(0)
+    losses = score_loss(model, x[ref], y[ref], 0)
+    assert set(idx.tolist()) == set(ref[losses.argsort()[:6]].tolist())
+    assert sampler.stats()["sel/score_kept"] >= sampler.stats()["sel/score_pool"]
+
+
+def test_band_scorer_prefers_middle_of_pool(toy):
+    model, x, y = toy
+    raw = score_loss(model, x, y, 0)
+    kept = Band(score_loss, q=0.5)(model, x, y, 0).topk(8).indices
+    ranks = raw.argsort().argsort()[kept]
+    assert ranks.min() >= 7 and ranks.max() <= 16

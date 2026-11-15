@@ -60,6 +60,12 @@ class TrainConfig:
     warmup_epochs: float = 1.0  # linear warm-up, then cosine decay to zero
     augment: bool = True
     seed: int = 0
+    # data ordering: "uniform" (baseline shuffling) or a scorer name understood by
+    # arorder.samplers.build_scorer (e.g. "loss:low"), applied by PoolFilterSampler
+    sampler: str = "uniform"
+    pool_mult: float = 2.0          # candidates per step as a multiple of batch_size
+    select_start_epoch: float = 0.0  # selection is uniform before this epoch
+    sampler_args: str = "{}"        # JSON keyword arguments for the scorer
     # per-step probe measurement (0 disables)
     probe_every: int = 0
     probe_n: int = 1000  # number of probe points used for the per-step measurement
@@ -142,7 +148,7 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
     of positions within the train split; the default is uniform shuffling
     without replacement (one pass over the data per epoch).
     """
-    from .samplers import UniformSampler  # local import: samplers may import from train
+    from .samplers import PoolFilterSampler, UniformSampler, build_scorer
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     run_dir = Path(cfg.run_dir)
@@ -162,7 +168,12 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
     steps_per_epoch = n // cfg.batch_size
     total_steps = cfg.epochs * steps_per_epoch
     gen = torch.Generator(device=dev).manual_seed(cfg.seed + 1)  # augmentation RNG
-    sampler = sampler or UniformSampler(n, cfg.batch_size, seed=cfg.seed + 2, device=dev)
+    if sampler is None and cfg.sampler == "uniform":
+        sampler = UniformSampler(n, cfg.batch_size, seed=cfg.seed + 2, device=dev)
+    elif sampler is None:
+        scorer = build_scorer(cfg.sampler, **json.loads(cfg.sampler_args))
+        sampler = PoolFilterSampler(data.train, cfg.batch_size, cfg.pool_mult, scorer,
+                                    start_step=int(cfg.select_start_epoch * steps_per_epoch), seed=cfg.seed + 2)
 
     probe_eval = None
     if cfg.probe_every:
@@ -203,7 +214,8 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
-        log.add(idx, lr=lr, train_loss=loss.item(), train_acc=(logits.argmax(1) == y).float().mean().item())
+        log.add(idx, lr=lr, train_loss=loss.item(), train_acc=(logits.argmax(1) == y).float().mean().item(),
+                **(sampler.stats() if hasattr(sampler, "stats") else {}))
 
     save_checkpoint(run_dir / "ckpt_final.pt", model, opt, total_steps)
     log.save(run_dir / "steps.npz")
