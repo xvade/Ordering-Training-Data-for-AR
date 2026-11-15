@@ -88,7 +88,7 @@ class ProbeEvaluator:
             out.append(m.detach() / g.abs().flatten(1).sum(1).clamp_min(1e-12))
         return torch.cat(out)
 
-    def evaluate(self, model, per_example: bool = False) -> dict:
+    def evaluate(self, model, per_example: bool = False, per_class: bool = False) -> dict:
         """Return a dict of scalar metrics (and per-example tensors if asked).
 
         Keys: ``clean_loss``, ``clean_acc``, ``clean_margin``, ``lin_radius``
@@ -126,6 +126,13 @@ class ProbeEvaluator:
             vals = [res["clean_acc"]] + accs
             res["auc"] = sum((radii[i + 1] - radii[i]) * (vals[i + 1] + vals[i]) / 2 for i in range(len(accs)))
         model.train(was_training)
+        if per_class:  # lists indexed by class: clean accuracy and accuracy under attack at each radius
+            classes = range(int(self.y.max().item()) + 1)
+            for key, m_ in ex.items():
+                if key == "lin_radius":
+                    continue
+                name = "class_clean_acc" if key == "clean_margin" else "class_adv_acc@" + key.split("@")[1]
+                res[name] = [(m_[self.y == c] > 0).float().mean().item() for c in classes]
         if per_example:
             res["per_example"] = ex
         return res

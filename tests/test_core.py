@@ -238,3 +238,64 @@ def test_class_balanced_sampler_balances_every_batch_and_covers_data():
         seen.append(idx)
     seen = torch.cat(seen)
     assert len(seen.unique()) == len(seen)  # no repeats within the first pass
+
+
+def _tiny_cfg(tmp_path, **kw):
+    from arorder.train import TrainConfig
+
+    base = dict(run_dir=str(tmp_path), model="smallcnn", width=8, epochs=1, batch_size=32, eval_every=1000,
+                eval_eps=[1.0, 2.0], eval_steps=2, ema_decay=0.9, stop_step=6)
+    base.update(kw)
+    return TrainConfig(**base)
+
+
+@pytest.fixture
+def tiny_data():
+    """A 400-image stand-in for the CIFAR-10 bundle (random pixels, 10 classes)."""
+    from arorder.data import DataBundle, GPUData, Splits
+
+    rng = np.random.default_rng(0)
+
+    def make(n):
+        return GPUData(rng.integers(0, 256, (n, 32, 32, 3), dtype=np.uint8), rng.integers(0, 10, n), DEV)
+
+    return DataBundle(train=make(256), probe=make(64), val=make(64), test=make(64),
+                      splits=Splits(np.arange(256), np.arange(64), np.arange(64)), num_classes=10)
+
+
+def test_trainer_snapshot_restore_rewinds_the_run(tmp_path, tiny_data):
+    from arorder.train import Trainer
+
+    t = Trainer(_tiny_cfg(tmp_path), data=tiny_data)
+    for _ in range(2):
+        t.train_step()
+    snap = t.snapshot()
+    before = flat_params(t.model).clone()
+    for _ in range(3):
+        t.train_step()
+    assert t.step == 5 and not torch.equal(flat_params(t.model), before)
+    t.restore(snap)
+    assert t.step == 2 and torch.equal(flat_params(t.model), before) and len(t.log.batch_idx) == 2
+
+
+def test_lookahead_keeps_the_best_scoring_candidate(tmp_path, tiny_data):
+    from arorder.train import Trainer
+
+    cfg = _tiny_cfg(tmp_path, lookahead_k=3, lookahead_len=3, lookahead_until_epoch=1.0, lookahead_eps=[1.0, 2.0])
+    t = Trainer(cfg, data=tiny_data)
+    final = t.fit()
+    assert t.step == 6 and "ema_clean_acc" in final and len(t.log.batch_idx) == 6
+    for seg in t.lookahead_log:
+        scores = [c["score"] for c in seg["candidates"]]
+        assert len(scores) == 3 and seg["chosen"] == int(np.argmax(scores))
+    # the final state is the chosen candidate's: its score is reproduced by scoring the current weights
+    assert t.selection_score()[0] == pytest.approx(max(c["score"] for c in t.lookahead_log[-1]["candidates"]), abs=0.05)
+
+
+def test_adversarial_training_step_runs_and_changes_weights(tmp_path, tiny_data):
+    from arorder.train import Trainer
+
+    t = Trainer(_tiny_cfg(tmp_path, train_eps=4.0, train_attack_steps=2), data=tiny_data)
+    before = flat_params(t.model).clone()
+    t.train_step()
+    assert not torch.equal(flat_params(t.model), before)

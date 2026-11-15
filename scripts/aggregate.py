@@ -27,7 +27,8 @@ def main(root: Path, out: Path) -> None:
         if not (f.parent / "meta.json").exists():
             continue  # unfinished run
         for ev in json.loads(f.read_text()):
-            rows.append(dict(variant=f.parent.parent.name, seed=int(f.parent.name[4:]), **ev))
+            scalars = {k: v for k, v in ev.items() if not isinstance(v, list)}  # per-class lists are not aggregated here
+            rows.append(dict(variant=f.parent.parent.name, seed=int(f.parent.name[4:]), **scalars))
     curves = pd.DataFrame(rows)
     curves.to_csv(out / "curves.csv", index=False)
     final = curves.sort_values("step").groupby(["variant", "seed"]).tail(1)
