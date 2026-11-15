@@ -93,3 +93,52 @@ at matched clean progress.
 **The phenomenon is present in the baseline.** In `base_gn_s0` (running), val
 accuracy under PGD at 2/255 is 22.0% after epoch 1 and 20.1% after epoch 11,
 while clean accuracy goes from 31% to 73%.
+
+## 2026-11-15 10:43-11:27 PST — Instrumented baseline `base_gn_s0`
+
+Hardware: g3030, Quadro RTX 6000, 4 CPUs, job 43270336, 44 min (probe before every update).
+Config: SmallCNN w32 GroupNorm, 20 epochs, batch 128, SGD lr 0.05 momentum 0.9 wd 5e-4,
+1 warm-up epoch + cosine, standard augmentation, seed 0. Run dir
+`/gscratch/scrubbed/sgvtc/ordering-ar-runs/base_gn_s0` (60 checkpoints, every 117 steps).
+Summary tables and figure: `results/phase1/trajectory_epochs.csv`, `trajectory.png`, `worst_steps.csv`.
+
+Val split (3000 points, PGD-10), by epoch:
+
+| epoch | clean | @1/255 | @2/255 | @4/255 | AUC(0-8) | lin. radius |
+|---|---|---|---|---|---|---|
+| 1 | 0.313 | 0.263 | 0.220 | 0.153 | 1.34 | 1.54 |
+| 2 | 0.387 | 0.327 | 0.273 | 0.171 | 1.56 | 2.01 |
+| 5 | 0.580 | 0.446 | 0.315 | 0.138 | 1.66 | 1.88 |
+| 8 | 0.680 | 0.452 | 0.257 | 0.057 | 1.35 | 1.33 |
+| 11 | 0.731 | 0.459 | 0.201 | 0.025 | 1.20 | 1.21 |
+| 14 | 0.762 | 0.456 | 0.197 | 0.022 | 1.20 | 1.20 |
+| 17 | 0.794 | 0.451 | 0.172 | 0.014 | 1.15 | 1.14 |
+| 20 | 0.799 | 0.456 | 0.172 | 0.013 | 1.15 | 1.14 |
+
+What the per-update log shows (probe split, 1000 points, PGD-5):
+
+1. **Robustness rises, peaks early, then decays while clean accuracy keeps
+   rising.** Accuracy at 2/255 peaks at ~0.31 in epoch 4 and ends at 0.185; at
+   4/255 it peaks in epoch 2 (0.17) and ends at 0.013. The linearised boundary
+   distance peaks in epoch 3 (2.0/255) and ends at 1.14/255. Robust-given-correct
+   at 2/255 falls monotonically from 0.73 to 0.23.
+2. **The decay is a slow drift, not a few bad updates.** The adversarial-minus-clean
+   loss gap rises by ~0.15 per epoch, i.e. ~4e-4 per update, while single updates
+   move it by +-0.04 (std). Half of all updates raise the gap and half lower it,
+   in every epoch. The worst 10% of updates account for about half of the upward
+   movement, but that is what a symmetric noisy walk looks like; it does not
+   identify a small set of culprit batches.
+3. **Clean and adversarial loss move together update by update** (correlation
+   0.99 in epoch 1, 0.9 mid-training, falling to 0.4 and below only when the
+   learning rate is nearly zero), with the adversarial loss moving more. The
+   fraction of updates that lower clean loss but raise adversarial loss grows
+   from 2% (epoch 1) to 10% (epoch 10) to 29% (epoch 20).
+4. **Loss-based robustness numbers are confounded by logit scale.** The mean
+   clean margin grows from -0.5 to 2.3 and the adversarial margin at 2/255 falls
+   from -0.7 to -2.9: the network becomes more confident, including when wrong.
+   Accuracy under attack and the linearised radius are scale-free and are the
+   quantities to trust.
+
+Consequence for the method: because harm is a small systematic bias under large
+symmetric noise, a selection rule has to shift the *average direction* of
+updates; removing rare outlier batches cannot be the mechanism.
