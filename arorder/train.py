@@ -32,6 +32,7 @@ import json
 import math
 import os
 import socket
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -168,9 +169,23 @@ def lr_at(step: int, cfg: TrainConfig, steps_per_epoch: int, total_steps: int) -
     return float(cfg.lr * 0.5 * (1 + math.cos(math.pi * frac)))
 
 
+def git_revision() -> str:
+    """Commit of the code that is running, with ``+dirty`` if the working tree has uncommitted changes."""
+    repo = Path(__file__).resolve().parent.parent
+    try:
+        sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=10).stdout.strip()
+        return sha + ("+dirty" if dirty else "") if sha else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def environment_info() -> dict:
-    """Host, GPU and Slurm job details, recorded with every run for the journal."""
+    """Host, GPU, Slurm job and code revision, recorded with every run for the journal."""
     return {
+        "git": git_revision(),
         "host": socket.gethostname(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),

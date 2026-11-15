@@ -17,26 +17,38 @@ import numpy as np
 from arorder.data import DEFAULT_DATA_DIR, make_splits
 
 np.set_printoptions(linewidth=220, precision=3, suppress=True)
-d = np.load(DEFAULT_DATA_DIR / "cifar10.npz")
-labels = d["y_train"][make_splits(len(d["y_train"])).train]  # labels of the train split, by position
+_labels = {}
+
+
+def train_labels(dataset: str) -> np.ndarray:
+    """Labels of the train split of ``dataset``, by position."""
+    if dataset not in _labels:
+        y = np.load(DEFAULT_DATA_DIR / f"{dataset}.npz")["y_train"]
+        _labels[dataset] = y[make_splits(len(y)).train]
+    return _labels[dataset]
+
 
 for run in sys.argv[1:]:
     run = Path(run)
     cfg = json.loads((run / "config.json").read_text())
+    labels = train_labels(cfg.get("dataset", "cifar10"))
+    n_classes = int(labels.max()) + 1
     z = np.load(run / "steps.npz")
     evals = {int(e["step"]): e for e in json.loads((run / "evals.json").read_text())}
     idx = z["batch_idx"]
     spe = len(labels) // cfg["batch_size"]
     sel = sorted(k for k in z.files if k.startswith("sel/"))
     print(f"\n=== {run}  sampler={cfg['sampler']} args={cfg['sampler_args']} pool_mult={cfg['pool_mult']}")
-    print("epoch | " + " ".join(f"{k[4:]:>14s}" for k in sel) + " | distinct  top10%share | class shares (x10 = uniform 1.0) | val clean @2 @8 (ema)")
+    print("epoch | " + " ".join(f"{k[4:]:>14s}" for k in sel) + " | distinct  top10%share | class shares (1.0 = uniform; min/median/max if > 10 classes) | val clean @2 @8 (ema)")
     for ep in range(len(idx) // spe):
         s = slice(ep * spe, (ep + 1) * spe)
         flat = idx[s].ravel()
         counts = np.bincount(flat, minlength=len(labels))
         used = np.sort(counts[counts > 0])[::-1]
         top = used[: max(1, len(labels) // 10)].sum() / used.sum()
-        cls = np.bincount(labels[flat], minlength=10) / len(flat) * 10
+        cls = np.bincount(labels[flat], minlength=n_classes) / len(flat) * n_classes
+        if n_classes > 10:  # too many to print: most and least trained-on class shares
+            cls = np.array([cls.min(), np.median(cls), cls.max()])
         ev = evals.get((ep + 1) * spe, {})
         pre = "ema_" if "ema_clean_acc" in ev else ""
         stats = " ".join(f"{np.nanmean(z[k][s]):14.3f}" if np.isfinite(z[k][s]).any() else f"{'-':>14s}" for k in sel)
