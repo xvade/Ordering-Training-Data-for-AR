@@ -25,9 +25,13 @@ Two complementary measurements are made.
 
 The step is a *pure gradient step* (no momentum history, no weight decay): it
 isolates the contribution of the batch itself, which is what a data-selection
-rule controls. ``eta`` defaults to ``lr / (1 - momentum)`` at the checkpoint's
-step, the total displacement SGD with momentum eventually assigns to one
-gradient.
+rule controls. ``eta`` defaults to the learning rate at the checkpoint's step,
+i.e. the displacement one gradient causes in the step it is applied. (The total
+displacement momentum eventually assigns to a gradient, ``lr / (1 - momentum)``,
+is 10x larger; applied in one shot it is far outside the linear regime and
+simply wrecks the model - measured on 2026-11-15, see JOURNAL.md - so it says
+nothing about what the batch does in real training.) Steps at 0.25x and 4x
+``eta`` are included to check linearity.
 
 Run as a module::
 
@@ -130,6 +134,7 @@ def investigate_checkpoint(
     batches_per_bin: int = 4,
     batch_size: int = 128,
     seed: int = 0,
+    eta_mult: float = 1.0,
 ) -> None:
     """Run the full counterfactual study for one checkpoint and save one ``.npz``.
 
@@ -146,7 +151,7 @@ def investigate_checkpoint(
     * ``trial/*``: one row per real finite step. ``trial/kind`` is ``random``,
       ``bin:<score>`` (batch drawn from one quantile bin of a score) or
       ``scale`` (a random batch at a different ``eta``); ``trial/bin``,
-      ``trial/eta``, ``trial/pred/<Q>`` (first-order prediction of the change of
+      ``trial/eta``, ``trial/idx`` (the batch), ``trial/pred/<Q>`` (first-order prediction of the change of
       ``Q``), and ``trial/d/<metric>`` (measured change of each ``val`` metric).
     * ``base/<metric>``: ``val`` metrics at the unperturbed weights.
     * ``noise/*``: spread of measured changes across PGD start seeds.
@@ -164,7 +169,7 @@ def investigate_checkpoint(
     steps_per_epoch = len(data.train) // cfg.batch_size
     total_steps = cfg.epochs * steps_per_epoch
     lr = lr_at(min(step, total_steps - 1), cfg, steps_per_epoch, total_steps)
-    eta = max(lr, 0.02 * cfg.lr) / (1 - cfg.momentum)  # floor: the schedule ends at lr = 0
+    eta = eta_mult * max(lr, 0.02 * cfg.lr)  # floor: the schedule ends at lr = 0
     rng = np.random.default_rng(seed)
     t0 = time.time()
     out: dict[str, np.ndarray] = {}
@@ -220,7 +225,7 @@ def investigate_checkpoint(
 
     def run_trial(kind, bin_, idx, eta_):
         pred, after = measure(idx, eta_)
-        trials.append(dict(kind=kind, bin=bin_, eta=eta_, pred=pred,
+        trials.append(dict(kind=kind, bin=bin_, eta=eta_, pred=pred, idx=np.asarray(idx, np.int32),
                            d={k: after[k] - base[k] for k in base}))
 
     n = len(data.train)
@@ -245,6 +250,7 @@ def investigate_checkpoint(
     out["trial/kind"] = np.array([t["kind"] for t in trials])
     out["trial/bin"] = np.array([t["bin"] for t in trials])
     out["trial/eta"] = np.array([t["eta"] for t in trials], np.float32)
+    out["trial/idx"] = np.stack([t["idx"] for t in trials])  # the batches, as positions in the train split
     for name in names:
         out[f"trial/pred/{name}"] = np.array([t["pred"][name] for t in trials], np.float32)
     for k in base:
@@ -282,8 +288,10 @@ if __name__ == "__main__":
     p.add_argument("--n-random", type=int, default=200)
     p.add_argument("--n-bins", type=int, default=20)
     p.add_argument("--batches-per-bin", type=int, default=4)
+    p.add_argument("--eta-mult", type=float, default=1.0, help="step size as a multiple of the learning rate")
     a = p.parse_args()
     for st in a.step:
         tag = "final" if st < 0 else f"{st:06d}"
         investigate_checkpoint(a.run_dir, st, (a.out_dir or a.run_dir / "investigate") / f"step_{tag}.npz",
-                               n_random=a.n_random, n_bins=a.n_bins, batches_per_bin=a.batches_per_bin)
+                               n_random=a.n_random, n_bins=a.n_bins, batches_per_bin=a.batches_per_bin,
+                               eta_mult=a.eta_mult)

@@ -8,4 +8,4 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export MKL_NUM_THREADS=$OMP_NUM_THREADS OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS NUMEXPR_MAX_THREADS=$OMP_NUM_THREADS
 export PYTHONPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
-PY="$AR_VENV/bin/python"
+export PY="$AR_VENV/bin/python"  # exported so that `bash -c '$PY ...'` works in child shells
