@@ -396,3 +396,22 @@ def test_project_capped_simplex_batched_matches_reference():
             lo, hi = (mid, hi) if (row - mid).clamp(0, 1).sum() > 12 else (lo, mid)
         assert torch.allclose(out, (row - lo).clamp(0, 1), atol=2e-3)
         assert out.sum().item() == pytest.approx(12.0, abs=2e-2)
+
+
+def test_gradient_match_adaptive_radius_and_skip(tmp_path, tiny_data):
+    from arorder.samplers import GradientMatchSampler
+    from arorder.train import Trainer
+
+    # an unreachable threshold: every radius is rejected and the update is vetoed
+    cfg = _tiny_cfg(tmp_path, sampler="grad_match", pool_mult=4.0,
+                    sampler_args='{"eps": [8, 2], "min_cos": 2.0, "fallback": "skip", "pgd_steps": 2, "target_n": 64}')
+    t = Trainer(cfg, data=tiny_data)
+    before = flat_params(t.model).clone()
+    t.train_step()
+    assert t.sampler.skip_update and torch.equal(flat_params(t.model), before) and t.step == 1
+    assert t.sampler.stats()["sel/eps"] == pytest.approx(2.0) and t.sampler.stats()["sel/accepted"] == 0.0
+    # a threshold of -1 accepts the largest radius straight away, and the weights move
+    s = GradientMatchSampler(tiny_data.train, tiny_data.probe, 32, 4, eps=[2, 8], min_cos=-1.0, pgd_steps=2,
+                             target_n=64, seed=0)
+    idx = s.next_batch(0, t.model)
+    assert len(idx) == 32 and not s.skip_update and s.stats()["sel/eps"] == pytest.approx(8.0)

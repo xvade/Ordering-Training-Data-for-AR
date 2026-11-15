@@ -319,11 +319,12 @@ class Trainer:
             x = pgd_linf(model, x, y, cfg.train_eps / 255, steps=cfg.train_attack_steps, init=init, keep_best=False)
         logits = model(x)
         loss = F.cross_entropy(logits, y)
-        self.opt.zero_grad(set_to_none=True)
-        loss.backward()
-        self.opt.step()
-        if self.ema is not None:
-            update_ema(self.ema, model, cfg.ema_decay)
+        if not getattr(self.sampler, "skip_update", False):  # a sampler may veto the update for this step
+            self.opt.zero_grad(set_to_none=True)
+            loss.backward()
+            self.opt.step()
+            if self.ema is not None:
+                update_ema(self.ema, model, cfg.ema_decay)
         self.log.add(idx, lr=lr, train_loss=loss.item(), train_acc=(logits.argmax(1) == y).float().mean().item(),
                      **(self.sampler.stats() if hasattr(self.sampler, "stats") else {}))
         self.step += 1

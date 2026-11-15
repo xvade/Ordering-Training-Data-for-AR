@@ -276,6 +276,10 @@ class GradientMatchSampler:
     direction. Motivation and the measured quality of the approximation are in
     JOURNAL.md (2026-11-15, "gradient matching").
 
+    ``eps`` may be a list of radii with a threshold ``min_cos``: see
+    :meth:`next_batch` (adaptive radius, and skipping updates that cannot be
+    matched).
+
     ``max_repeat`` bounds how often one candidate may appear in a batch
     (``1`` = a batch of distinct samples; ``0`` = unbounded). Unbounded fits put
     most weight on a few dozen candidates; over a run the same samples are then
@@ -291,27 +295,33 @@ class GradientMatchSampler:
     actually returned), ``cos_uniform_batch`` (for a plain batch of the same
     size: the fair reference), ``cos_uniform`` (for the mean of all
     candidates), ``norm_ratio`` (norm of the batch's mean gradient relative to a plain
-    batch's), ``eff_n`` (effective number of distinct samples in the batch).
+    batch's), ``eff_n`` (effective number of distinct samples in the batch),
+    ``eps`` (the radius used, in 1/255) and ``accepted`` (1 if the batch reached
+    ``min_cos``).
     """
 
-    def __init__(self, data, probe, batch_size: int, pool_mult: float = 4.0, eps: float = 8.0, pgd_steps: int = 5,
+    def __init__(self, data, probe, batch_size: int, pool_mult: float = 4.0, eps=8.0, pgd_steps: int = 5,
                  mix: float = 1.0, target: str = "train", target_n: int = 256, nnls_iters: int = 200,
-                 max_repeat: float = 0.0, n_coords: int = 0, grad_chunk: int = 128, start_step: int = 0,
-                 seed: int = 0):
-        assert target in ("train", "probe")
+                 max_repeat: float = 0.0, n_coords: int = 0, grad_chunk: int = 128, min_cos: float = 0.0,
+                 fallback: str = "smallest", start_step: int = 0, seed: int = 0):
+        assert target in ("train", "probe") and fallback in ("smallest", "uniform", "skip")
         self.data, self.probe, self.batch_size = data, probe, batch_size
         self.n_candidates = int(round(pool_mult * batch_size))
         # with target="train" each draw holds the candidates followed by the target samples
         self.pool_size = self.n_candidates + (target_n if target == "train" else 0)
-        self.eps, self.pgd_steps, self.mix = eps / 255, pgd_steps, mix
+        # one radius or several; several are tried from the largest down (see next_batch)
+        self.eps_list = sorted((e / 255 for e in (eps if isinstance(eps, (list, tuple)) else [eps])), reverse=True)
+        self.pgd_steps, self.mix = pgd_steps, mix
         self.target, self.target_n, self.nnls_iters, self.start_step = target, target_n, nnls_iters, start_step
-        self.max_repeat = max_repeat
+        self.max_repeat, self.min_cos, self.fallback = max_repeat, min_cos, fallback
         # n_coords > 0: fit on that many randomly chosen gradient coordinates (fixed for the run) instead of
         # all of them, which bounds memory for large models; grad_chunk = samples per per-sample-gradient call
         self.n_coords, self.grad_chunk, self._coords = n_coords, grad_chunk, None
         self.base = UniformSampler(len(data), self.pool_size, seed=seed, device=data.device)
         self.gen = torch.Generator(device="cpu").manual_seed(seed + 1)
         self._stats: dict = {}
+        #: set by next_batch when the trainer should make no update at this step (fallback="skip")
+        self.skip_update = False
 
     @staticmethod
     def _flat_grad(model, x, y):
@@ -319,49 +329,81 @@ class GradientMatchSampler:
         grads = torch.autograd.grad(F.cross_entropy(model(x), y), params)
         return torch.cat([g.reshape(-1) for g in grads])
 
-    def target_direction(self, model, x=None, y=None) -> torch.Tensor:
-        """Target direction measured on ``(x, y)``, or on a random probe mini-batch if not given."""
-        if x is None:
-            idx = torch.randperm(len(self.probe), generator=self.gen)[: self.target_n].to(self.probe.device)
-            x, y = self.probe.batch(idx)
-        g_adv = self._flat_grad(model, pgd_linf(model, x, y, self.eps, steps=self.pgd_steps, keep_best=False), y)
+    def target_direction(self, model, x, y, eps: float) -> torch.Tensor:
+        """``(1 - mix) * g_clean + mix * g_adv`` on ``(x, y)`` for attack radius ``eps`` (pixel units)."""
+        g_adv = self._flat_grad(model, pgd_linf(model, x, y, eps, steps=self.pgd_steps, keep_best=False), y)
         if self.mix >= 1:
             return g_adv
         return (1 - self.mix) * self._flat_grad(model, x, y) + self.mix * g_adv
 
+    def _fit(self, G, K, t):
+        """Weights, batch counts and cosines for one target direction."""
+        b = G @ t
+        if self.max_repeat > 0:  # diversity constraint: no candidate more than max_repeat times in the batch
+            w = capped_direction_fit(K, b, t.norm().item(), float(self.batch_size), self.max_repeat)
+        else:
+            w = nonneg_least_squares(K, b, iters=self.nnls_iters)
+        if not torch.isfinite(w).all() or w.sum() <= 0:
+            return None
+        counts = systematic_counts(w.cpu(), self.batch_size, self.gen).to(G.device)
+        cf = counts.float()
+        cos = lambda a: (a @ t / (a.norm() * t.norm()).clamp_min(1e-30)).item()
+        batch, uniform_batch = cf @ G / self.batch_size, G[: self.batch_size].mean(0)
+        stats = {"sel/cos_fit": cos(w @ G), "sel/cos_batch": cos(batch), "sel/cos_uniform": cos(G.mean(0)),
+                 "sel/cos_uniform_batch": cos(uniform_batch),  # a plain batch of the same size: the fair reference
+                 "sel/norm_ratio": (batch.norm() / uniform_batch.norm().clamp_min(1e-30)).item(),
+                 "sel/eff_n": (cf.sum() ** 2 / (cf ** 2).sum()).item()}
+        return counts, stats
+
     def next_batch(self, step: int, model=None) -> torch.Tensor:
+        """Batch for this step.
+
+        With several radii in ``eps`` they are tried from the largest down and
+        the first whose batch reaches cosine ``min_cos`` with its target is
+        used: the strongest adversarial direction the candidates can still
+        express. If none qualifies, ``fallback`` decides: ``"smallest"`` uses
+        the smallest radius anyway, ``"uniform"`` returns a plain batch, and
+        ``"skip"`` asks the trainer to make no update at this step (training
+        on a batch that points nowhere near a robustness-improving direction is
+        what erodes robustness).
+        """
         draw = self.base.next_batch(step)
         pool, target_idx = draw[: self.n_candidates], draw[self.n_candidates :]
+        self.skip_update = False
         if step < self.start_step:
             self._stats = {}
             return pool[: self.batch_size]
         x, y = self.data.batch(pool)
+        if self.target == "train":
+            tx, ty = self.data.batch(target_idx)
+        else:
+            tx, ty = self.probe.batch(torch.randperm(len(self.probe), generator=self.gen)[: self.target_n]
+                                      .to(self.probe.device))
         was_training = model.training
         model.eval()
-        t = self.target_direction(model, *self.data.batch(target_idx)) if self.target == "train" \
-            else self.target_direction(model)
+        targets = [self.target_direction(model, tx, ty, eps) for eps in self.eps_list]
         if self.n_coords and self._coords is None:
-            self._coords = torch.randperm(len(t), generator=self.gen)[: self.n_coords].sort().values.to(t.device)
+            self._coords = torch.randperm(len(targets[0]), generator=self.gen)[: self.n_coords].sort().values \
+                .to(targets[0].device)
         G = per_sample_gradient_matrix(model, x, y, chunk=self.grad_chunk, coords=self._coords)
-        if self._coords is not None:
-            t = t[self._coords]  # the fit and the logged cosines then live in the reduced space
         model.train(was_training)
-        if self.max_repeat > 0:  # diversity constraint: no candidate more than max_repeat times in the batch
-            w = capped_direction_fit(G @ G.T, G @ t, t.norm().item(), float(self.batch_size), self.max_repeat)
-        else:
-            w = nonneg_least_squares(G @ G.T, G @ t, iters=self.nnls_iters)
-        if not torch.isfinite(w).all() or w.sum() <= 0:  # no usable fit: fall back to a uniform batch
+        if self._coords is not None:
+            targets = [t[self._coords] for t in targets]  # the fit and the logged cosines live in the reduced space
+        K, chosen = G @ G.T, None
+        for eps, t in zip(self.eps_list, targets):
+            fit = self._fit(G, K, t)
+            if fit is not None:
+                chosen = (eps, *fit)
+                if fit[1]["sel/cos_batch"] >= self.min_cos:
+                    break
+        if chosen is None:  # no usable fit at any radius
             self._stats = {}
             return pool[: self.batch_size]
-        counts = systematic_counts(w.cpu(), self.batch_size, self.gen).to(pool.device)
-        cf = counts.float()
-        mean_pool, fit, batch = G.mean(0), w @ G, cf @ G / self.batch_size
-        cos = lambda a: (a @ t / (a.norm() * t.norm()).clamp_min(1e-30)).item()
-        uniform_batch = G[: self.batch_size].mean(0)  # what a plain batch of the same size would give
-        self._stats = {"sel/cos_fit": cos(fit), "sel/cos_batch": cos(batch), "sel/cos_uniform": cos(mean_pool),
-                       "sel/cos_uniform_batch": cos(uniform_batch),
-                       "sel/norm_ratio": (batch.norm() / uniform_batch.norm().clamp_min(1e-30)).item(),
-                       "sel/eff_n": (cf.sum() ** 2 / (cf ** 2).sum()).item()}
+        eps, counts, stats = chosen
+        self._stats = dict(stats, **{"sel/eps": eps * 255, "sel/accepted": float(stats["sel/cos_batch"] >= self.min_cos)})
+        if stats["sel/cos_batch"] < self.min_cos and self.fallback != "smallest":
+            self.skip_update = self.fallback == "skip"
+            return pool[: self.batch_size]
         return torch.repeat_interleave(pool, counts)
 
     def stats(self) -> dict:
