@@ -48,6 +48,53 @@ class UniformSampler:
         return {}
 
 
+class ClassBalancedSampler:
+    """Shuffling in which every batch holds (almost) the same number of samples per class.
+
+    Each class gets its own random permutation; the stream interleaves the
+    classes in a fresh random order per round, so any window of ``batch_size``
+    consecutive samples is class-balanced to within one sample. This is a pure
+    ordering change: every sample is still used equally often (classes with
+    fewer samples wrap around slightly earlier).
+
+    Motivation: at a given moment the raw training iterate over-predicts some
+    classes, and the one-step effect of a batch on held-out loss is dominated by
+    which classes happen to be in it (JOURNAL.md, 2026-11-15). Balancing every
+    batch removes that source of step-to-step noise.
+    """
+
+    def __init__(self, labels: torch.Tensor, batch_size: int, seed: int = 0, device="cpu"):
+        self.batch_size, self.device = batch_size, device
+        self.gen = torch.Generator(device="cpu").manual_seed(seed)
+        labels = labels.cpu()
+        self.by_class = [torch.nonzero(labels == c, as_tuple=False).flatten() for c in labels.unique().tolist()]
+        self._perms = [self._shuffled(members) for members in self.by_class]
+        self._pos = [0] * len(self.by_class)
+        self._buffer = torch.empty(0, dtype=torch.long)
+
+    def _shuffled(self, members):
+        return members[torch.randperm(len(members), generator=self.gen)]
+
+    def _next_round(self) -> torch.Tensor:
+        """One sample from every class, classes in random order."""
+        out = []
+        for c in torch.randperm(len(self.by_class), generator=self.gen).tolist():
+            if self._pos[c] >= len(self._perms[c]):
+                self._perms[c], self._pos[c] = self._shuffled(self.by_class[c]), 0
+            out.append(self._perms[c][self._pos[c]])
+            self._pos[c] += 1
+        return torch.stack(out)
+
+    def next_batch(self, step: int, model=None) -> torch.Tensor:
+        while len(self._buffer) < self.batch_size:
+            self._buffer = torch.cat([self._buffer, self._next_round()])
+        idx, self._buffer = self._buffer[: self.batch_size], self._buffer[self.batch_size :]
+        return idx.to(self.device)
+
+    def stats(self) -> dict:
+        return {}
+
+
 class PoolFilterSampler:
     """Keep the ``batch_size`` best-scoring samples out of a uniform candidate pool.
 
@@ -65,10 +112,12 @@ class PoolFilterSampler:
     the trainer applies augmentation afterwards.
     """
 
-    def __init__(self, data, batch_size: int, pool_mult: float, scorer, start_step: int = 0, seed: int = 0):
+    def __init__(self, data, batch_size: int, pool_mult: float, scorer, start_step: int = 0, seed: int = 0,
+                 base=None):
         self.data, self.batch_size, self.scorer, self.start_step = data, batch_size, scorer, start_step
         self.pool_size = int(round(pool_mult * batch_size))
-        self.base = UniformSampler(len(data), self.pool_size, seed=seed, device=data.device)
+        # `base` supplies the candidate pools (default: uniform shuffling)
+        self.base = base or UniformSampler(len(data), self.pool_size, seed=seed, device=data.device)
         self._stats: dict = {}
 
     def next_batch(self, step: int, model=None) -> torch.Tensor:

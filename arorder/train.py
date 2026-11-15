@@ -62,7 +62,8 @@ class TrainConfig:
     warmup_epochs: float = 1.0  # linear warm-up, then cosine decay to zero
     augment: bool = True
     seed: int = 0
-    # data ordering: "uniform" (baseline shuffling) or a scorer name understood by
+    # data ordering: "uniform" (baseline shuffling), "class_balanced" (every batch
+    # has equal class counts), or a scorer name understood by
     # arorder.samplers.build_scorer (e.g. "loss:low"), applied by PoolFilterSampler
     sampler: str = "uniform"
     pool_mult: float = 2.0          # candidates per step as a multiple of batch_size
@@ -188,7 +189,7 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
     of positions within the train split; the default is uniform shuffling
     without replacement (one pass over the data per epoch).
     """
-    from .samplers import PoolFilterSampler, UniformSampler, build_scorer
+    from .samplers import ClassBalancedSampler, PoolFilterSampler, UniformSampler, build_scorer
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     run_dir = Path(cfg.run_dir)
@@ -220,6 +221,8 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
     gen = torch.Generator(device=dev).manual_seed(cfg.seed + 1)  # augmentation RNG
     if sampler is None and cfg.sampler == "uniform":
         sampler = UniformSampler(n, cfg.batch_size, seed=cfg.seed + 2, device=dev)
+    elif sampler is None and cfg.sampler == "class_balanced":
+        sampler = ClassBalancedSampler(data.train.y, cfg.batch_size, seed=cfg.seed + 2, device=dev)
     elif sampler is None:
         scorer = build_scorer(cfg.sampler, data=data, **json.loads(cfg.sampler_args))
         sampler = PoolFilterSampler(data.train, cfg.batch_size, cfg.pool_mult, scorer,

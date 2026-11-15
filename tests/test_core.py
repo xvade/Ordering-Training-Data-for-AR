@@ -223,3 +223,18 @@ def test_smoothed_error_gradient_matches_finite_difference(toy):
     after = serr()
     set_flat_params(model, theta)
     assert after - before == pytest.approx(-eta * (g @ g).item(), rel=0.2)
+
+
+def test_class_balanced_sampler_balances_every_batch_and_covers_data():
+    from arorder.samplers import ClassBalancedSampler
+
+    labels = torch.arange(10).repeat_interleave(50)  # 500 samples, 50 per class
+    s = ClassBalancedSampler(labels, batch_size=40, seed=0)
+    seen = []
+    for step in range(12):  # 480 samples: less than one pass
+        idx = s.next_batch(step)
+        counts = torch.bincount(labels[idx], minlength=10)
+        assert counts.min() >= 3 and counts.max() <= 5
+        seen.append(idx)
+    seen = torch.cat(seen)
+    assert len(seen.unique()) == len(seen)  # no repeats within the first pass
