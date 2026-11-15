@@ -381,3 +381,18 @@ def test_gradient_match_with_coordinate_subset(tmp_path, tiny_data):
                              target_n=64, n_coords=512, max_repeat=1, seed=0)
     idx = s.next_batch(0, t.model)
     assert len(idx) == 32 and len(set(idx.tolist())) == 32 and len(s._coords) == 512
+
+
+def test_project_capped_simplex_batched_matches_reference():
+    """The vectorised projection agrees with a plain scalar bisection, row by row."""
+    from arorder.samplers import project_capped_simplex
+
+    v = torch.randn(4, 60, generator=torch.Generator().manual_seed(1)) * 2
+    w = project_capped_simplex(v, total=12.0, cap=1.0)
+    for row, out in zip(v, w):
+        lo, hi = (row.min() - 1).item(), row.max().item()
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if (row - mid).clamp(0, 1).sum() > 12 else (lo, mid)
+        assert torch.allclose(out, (row - lo).clamp(0, 1), atol=2e-3)
+        assert out.sum().item() == pytest.approx(12.0, abs=2e-2)

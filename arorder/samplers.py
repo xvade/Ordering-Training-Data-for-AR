@@ -184,20 +184,30 @@ def nonneg_least_squares(K: torch.Tensor, b: torch.Tensor, iters: int = 300) -> 
     return w
 
 
-def project_capped_simplex(v: torch.Tensor, total: float, cap: float, iters: int = 40) -> torch.Tensor:
-    """Euclidean projection of ``v`` onto ``{w : 0 <= w_i <= cap, sum(w) = total}`` (bisection on the shift)."""
-    lo, hi = (v.min() - cap).item(), v.max().item()
-    for _ in range(iters):
-        mid = (lo + hi) / 2
-        if (v - mid).clamp(0, cap).sum() > total:
-            lo = mid
-        else:
-            hi = mid
-    return (v - (lo + hi) / 2).clamp(0, cap)
+def project_capped_simplex(v: torch.Tensor, total: float, cap: float, rounds: int = 3, grid: int = 64) -> torch.Tensor:
+    """Euclidean projection of the rows of ``v`` onto ``{w : 0 <= w_i <= cap, sum(w) = total}``.
+
+    The projection is ``clip(v - tau, 0, cap)`` for the shift ``tau`` that makes
+    the sum right; ``tau`` is found by ``rounds`` of evaluating ``grid`` candidate
+    shifts at once and narrowing the bracket (a vectorised bisection: each round
+    shrinks the bracket ``grid``-fold). ``v`` may be a vector or a batch of
+    vectors ``(batch, n)``.
+    """
+    squeeze = v.dim() == 1
+    v = v[None] if squeeze else v
+    lo, hi = v.amin(1) - cap, v.amax(1)                       # sum is n*cap >= total at lo and 0 <= total at hi
+    frac = torch.linspace(0, 1, grid, device=v.device, dtype=v.dtype)
+    for _ in range(rounds):
+        taus = lo[:, None] + (hi - lo)[:, None] * frac[None]   # (batch, grid)
+        sums = (v[:, None, :] - taus[:, :, None]).clamp(0, cap).sum(2)
+        k = ((sums > total).sum(1) - 1).clamp(0, grid - 2)     # last grid point whose sum is still too large
+        lo, hi = taus.gather(1, k[:, None]).squeeze(1), taus.gather(1, k[:, None] + 1).squeeze(1)
+    w = (v - ((lo + hi) / 2)[:, None]).clamp(0, cap)
+    return w[0] if squeeze else w
 
 
 def capped_direction_fit(K: torch.Tensor, b: torch.Tensor, t_norm: float, total: float, cap: float,
-                         iters: int = 100, scales=(1.0, 2.0, 4.0)) -> torch.Tensor:
+                         iters: int = 80, scales=(1.0, 2.0, 4.0)) -> torch.Tensor:
     """Weights ``0 <= w_i <= cap`` with ``sum(w) = total`` whose combination best matches a direction.
 
     ``K = G G^T`` and ``b = G t`` describe candidate gradients ``G`` and the
@@ -205,8 +215,8 @@ def capped_direction_fit(K: torch.Tensor, b: torch.Tensor, t_norm: float, total:
     ``min_w || G^T w - alpha * t / ||t|| ||^2`` over the capped simplex is
     solved by projected gradient; the length is unknown (only the direction
     matters), so a few lengths, multiples ``scales`` of the length of the
-    uniform combination, are tried and the solution with the highest cosine
-    to ``t`` is returned.
+    uniform combination, are solved side by side and the solution with the
+    highest cosine to ``t`` is returned.
 
     With ``total = batch size`` and ``cap = 1`` the weights are inclusion
     probabilities of a batch *without repeats*; a larger cap allows a sample to
@@ -217,15 +227,13 @@ def capped_direction_fit(K: torch.Tensor, b: torch.Tensor, t_norm: float, total:
     w_uniform = torch.full_like(b, total / n)
     ref = (w_uniform @ K @ w_uniform).clamp_min(1e-30).sqrt()  # length of the uniform combination
     b_hat = b / max(t_norm, 1e-30)                              # G t / ||t||
-    best, best_cos = w_uniform, (b_hat @ w_uniform / ref).item()
-    for c in scales:
-        alpha, w = c * ref, w_uniform.clone()
-        for _ in range(iters):
-            w = project_capped_simplex(w - step * (K @ w - alpha * b_hat), total, cap)
-        cosine = (b_hat @ w / (w @ K @ w).clamp_min(1e-30).sqrt()).item()
-        if cosine > best_cos:
-            best, best_cos = w, cosine
-    return best
+    alphas = torch.tensor(scales, device=b.device, dtype=b.dtype) * ref
+    W = w_uniform.repeat(len(scales), 1)                        # one row per target length
+    for _ in range(iters):
+        W = project_capped_simplex(W - step * (W @ K - alphas[:, None] * b_hat[None]), total, cap)
+    W = torch.cat([W, w_uniform[None]])                         # the uniform weights are always a candidate
+    cosines = (W @ b_hat) / ((W @ K) * W).sum(1).clamp_min(1e-30).sqrt()
+    return W[cosines.argmax()]
 
 
 def systematic_counts(w: torch.Tensor, n: int, generator: torch.Generator | None = None) -> torch.Tensor:

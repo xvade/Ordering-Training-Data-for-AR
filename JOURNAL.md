@@ -449,3 +449,80 @@ Still to establish: that it holds to the end of training and over seeds (runs
 `p7_gm` queued), that the robustness survives stronger attacks (AutoAttack on
 `gm_smoke` queued), its accuracy-robustness curve against real adversarial
 training, cost reduction, other architectures and datasets.
+
+## 2026-11-15 13:40-14:30 PST — Gradient matching over full training (v1, uncapped)
+
+Hardware: g3026-g3037, Quadro RTX 6000, 4 CPUs per job. Jobs 43274256-65 (`p7_gm`:
+one 20-epoch run each, SmallCNN, uniform for epoch 1 then gradient matching, 512
+candidates + 256 target samples per step, batch 128), AT reference sweep 43273911
+(`p6_at_rules/at_uniform`, 3 seeds), feasibility on the AT model 43274870, coordinate
+subsets 43274281, AutoAttack on the smoke model 43274279. Figure:
+`results/p7_gm/frontier_v1.png`.
+
+### A. End-of-training results (val, PGD-10, averaged weights = raw at the end)
+
+| run | seeds | clean | @2/255 | @8/255 | AUC |
+|---|---|---|---|---|---|
+| uniform, 5 epochs | 3 | 0.597 | 0.313 | 0.009 | 1.59 |
+| uniform, 10 epochs | 3 | 0.702 | 0.222 | 0.000 | 1.23 |
+| uniform, 20 epochs | 3 | 0.797 | 0.171 | 0.000 | 1.14 |
+| gradient matching, target 2/255 | 1 | 0.731 | 0.291 | 0.001 | 1.51 |
+| gradient matching, target 4/255 | 1 | 0.581 | 0.257 | 0.004 | 1.31 |
+| gradient matching, target 8/255 | 3 | 0.384 +- 0.037 | 0.214 +- 0.015 | 0.022 +- 0.003 | 1.16 +- 0.05 |
+| real adversarial training at 8/255 (PGD-3) | 3 | 0.510 +- 0.004 | 0.458 +- 0.005 | 0.295 +- 0.001 | 3.22 +- 0.03 |
+
+* **Target 2/255 is the first data-only rule above the uniform curves at the end
+  of training**: 0.291 at 2/255 with 0.731 clean, where the uniform end points
+  interpolate to about 0.206 and the uniform run's averaged weights mid-run to
+  about 0.26. Mid-run it is further above (epoch 10: 0.655 clean / 0.387; uniform
+  at that accuracy: about 0.32).
+* **Larger targets do better early and then collapse.** Target 8/255 reaches
+  0.17-0.19 at 8/255 by epoch 2 and holds it to about epoch 5 with clean accuracy
+  ~0.40, then loses it while clean accuracy does not improve; target 4/255 the
+  same, later. All three seeds of the 8/255 run show it.
+
+### B. Why it collapses (from the step log, `scripts/analyze_selection.py`; 8/255 run, seed 0)
+
+| epoch | cos(batch, target) | cos(uniform batch, target) | effective distinct samples per batch of 128 | distinct samples used in the epoch | share of updates going to the most-used 10% of data |
+|---|---|---|---|---|---|
+| 2 | 0.93 | 0.38 | 60 | 16,061 | 0.59 |
+| 5 | 0.83 | 0.05 | 42 | 12,290 | 0.70 |
+| 8 | 0.67 | -0.29 | 27 | 9,003 | 0.83 |
+| 12 | 0.53 | -0.44 | 21 | 7,226 | 0.90 |
+| 20 | 0.31 | -0.45 | 18 | 4,832 | 0.99 |
+
+The unconstrained fit puts its weight on fewer and fewer samples, and the same
+ones every time they are drawn (cats twice their share by the end). The rest of
+the data stops being trained on, the model drifts to states where the clean
+gradient of a random batch points *against* the adversarial gradient, and the
+fit can no longer express the target. With the 2/255 target the same trend is
+much slower (15,410 distinct samples and cosine 0.57 in epoch 20).
+
+### C. It is the selection that drifts, not the idea that runs out
+
+The same fit on a real adversarially-trained model (`p5_at/cnn_at8`, averaged
+weights, 512 candidates, target at 8/255 on held-out probe points): cosine of the
+fitted combination with the held-out target 0.86 / 0.89 / 0.87 at epochs 4 / 11 /
+20 (uniform pool mean 0.69 / 0.51 / 0.31), effective number of samples 139 / 90 /
+81. Along a genuine adversarial-training trajectory the adversarial gradient stays
+expressible by clean samples to the end. So a version that stays near that
+trajectory should not hit the wall; the obvious constraint is on how concentrated
+the weights may be (next entry).
+
+### D. Robustness is real under stronger attacks (so far)
+
+`gm_smoke` (2 epochs), val, 3000 points: PGD-10 gives 0.315 / 0.267 / 0.174 at
+2 / 4 / 8 per 255; worst case over 3 restarts x (cross-entropy, margin) PGD-50
+gives 0.299 / 0.244 / 0.134; standard AutoAttack 0.299 / 0.242 / 0.126. No sign
+of gradient masking, but PGD-10 overstates accuracy at 8/255 by about a third,
+so headline numbers must come from the strong attack.
+
+### E. The fit does not need whole gradients
+
+Fitting on a random subset of gradient coordinates and scoring the combination in
+the full space against a held-out target (512 candidates, 8/255, epoch 4 / 11 of
+`base_ema_s0`): all 279,466 coordinates 0.88 / 0.71; 32,768 random coordinates
+0.88 / 0.69; 8,192: 0.85 / 0.66; 2,048: 0.83 / 0.62; final layer only (1,290):
+0.59 / 0.28; uniform batch 0.41 / 0.20. A few thousand random coordinates per
+sample are enough, the last layer is not. `GradientMatchSampler(n_coords=...)`
+implements this for models too large to hold full per-sample gradients.
