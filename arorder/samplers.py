@@ -280,6 +280,9 @@ class GradientMatchSampler:
     :meth:`next_batch` (adaptive radius, and skipping updates that cannot be
     matched).
 
+    ``uniform_frac`` reserves that fraction of every batch for plain uniform
+    samples.
+
     ``max_repeat`` bounds how often one candidate may appear in a batch
     (``1`` = a batch of distinct samples; ``0`` = unbounded). Unbounded fits put
     most weight on a few dozen candidates; over a run the same samples are then
@@ -303,7 +306,7 @@ class GradientMatchSampler:
     def __init__(self, data, probe, batch_size: int, pool_mult: float = 4.0, eps=8.0, pgd_steps: int = 5,
                  mix: float = 1.0, target: str = "train", target_n: int = 256, nnls_iters: int = 200,
                  max_repeat: float = 0.0, n_coords: int = 0, grad_chunk: int = 128, min_cos: float = 0.0,
-                 fallback: str = "smallest", start_step: int = 0, seed: int = 0):
+                 fallback: str = "smallest", uniform_frac: float = 0.0, start_step: int = 0, seed: int = 0):
         assert target in ("train", "probe") and fallback in ("smallest", "uniform", "skip")
         self.data, self.probe, self.batch_size = data, probe, batch_size
         self.n_candidates = int(round(pool_mult * batch_size))
@@ -314,6 +317,9 @@ class GradientMatchSampler:
         self.pgd_steps, self.mix = pgd_steps, mix
         self.target, self.target_n, self.nnls_iters, self.start_step = target, target_n, nnls_iters, start_step
         self.max_repeat, self.min_cos, self.fallback = max_repeat, min_cos, fallback
+        # this many slots of every batch are filled with plain uniform samples (the rest by the fit), so that
+        # the whole training set keeps being trained on
+        self.n_uniform = int(round(uniform_frac * batch_size))
         # n_coords > 0: fit on that many randomly chosen gradient coordinates (fixed for the run) instead of
         # all of them, which bounds memory for large models; grad_chunk = samples per per-sample-gradient call
         self.n_coords, self.grad_chunk, self._coords = n_coords, grad_chunk, None
@@ -345,7 +351,8 @@ class GradientMatchSampler:
             w = nonneg_least_squares(K, b, iters=self.nnls_iters)
         if not torch.isfinite(w).all() or w.sum() <= 0:
             return None
-        counts = systematic_counts(w.cpu(), self.batch_size, self.gen).to(G.device)
+        counts = systematic_counts(w.cpu(), self.batch_size - self.n_uniform, self.gen).to(G.device)
+        counts[: self.n_uniform] += 1  # candidates are in random order, so the first ones are a uniform draw
         cf = counts.float()
         cos = lambda a: (a @ t / (a.norm() * t.norm()).clamp_min(1e-30)).item()
         batch, uniform_batch = cf @ G / self.batch_size, G[: self.batch_size].mean(0)

@@ -415,3 +415,15 @@ def test_gradient_match_adaptive_radius_and_skip(tmp_path, tiny_data):
                              target_n=64, seed=0)
     idx = s.next_batch(0, t.model)
     assert len(idx) == 32 and not s.skip_update and s.stats()["sel/eps"] == pytest.approx(8.0)
+
+
+def test_gradient_match_uniform_fraction_reserves_plain_samples(tmp_path, tiny_data):
+    from arorder.samplers import GradientMatchSampler
+    from arorder.train import Trainer
+
+    t = Trainer(_tiny_cfg(tmp_path), data=tiny_data)
+    s = GradientMatchSampler(tiny_data.train, tiny_data.probe, 32, 4, eps=4.0, pgd_steps=2, target_n=64,
+                             uniform_frac=0.5, seed=0)
+    idx = s.next_batch(0, t.model)
+    first16 = GradientMatchSampler(tiny_data.train, tiny_data.probe, 32, 4, target_n=64, seed=0).base.next_batch(0)[:16]
+    assert len(idx) == 32 and set(first16.tolist()) <= set(idx.tolist())
