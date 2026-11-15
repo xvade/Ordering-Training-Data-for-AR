@@ -362,3 +362,90 @@ pilots. Its conclusions that change the plan:
 Decisions taken: implement lookahead order selection (done: `Trainer.lookahead_segment`),
 run the order-vs-initialisation experiment (sweep G), and open the
 adversarial-training track with gate runs (`p5_at`).
+
+## 2026-11-15 13:00-13:40 PST — Lookahead (null), adversarial-training gate, gradient matching (works)
+
+Hardware: g3026-g3032, Quadro RTX 6000, 4 CPUs per job. Jobs: lookahead pilot
+43273793 (`p4_lookahead`), AT gate 43273794-95 (`p5_at`), gradient-matching
+feasibility 43273910 (`scripts/adhoc/gradient_matching.py` on `base_ema_s0`), smoke
+run 43274171 (`gm_smoke`).
+
+### A. Lookahead order selection: no gain
+
+Best of 4 data orders per epoch for the first 6 epochs, scored on `probe` by
+(mean robust accuracy over 0-4/255) + clean accuracy of the averaged weights
+(`la_k4_e6`, seed 0): final 0.788 clean / 0.172 at 2/255 / AUC 1.13, the same as
+uniform (0.797 / 0.171 / 1.14). Within one epoch the four candidates' robustness
+terms differ by about 0.003; the score differences are clean-accuracy noise. The
+order-driven offset the planner measured needs several epochs to develop, so a
+greedy one-epoch lookahead has nothing to select. Not pursued further.
+
+### B. Adversarial-training gate (PGD-3 on every batch, 30 epochs, one seed)
+
+SmallCNN, train radius 4/255: clean 0.66, 0.56 at 2/255, 0.45 at 4/255, 0.23 at
+8/255 at epoch 26, still improving; no decay of robustness (the small model
+underfits adversarial training), as the planner predicted. ResNet-20 at 8/255:
+0.41 clean / 0.28 at 8/255 at epoch 8 (running). These are the "robust model"
+reference numbers for this model size.
+
+### C. Gradient matching: clean samples can stand in for adversarial examples
+
+**Feasibility** (`scripts/adhoc/gradient_matching.py`, averaged weights of
+`base_ema_s0`). Target: gradient of the adversarial loss on held-out probe
+points. Candidates: clean per-sample gradients of a random pool of training
+samples. Fit: non-negative least squares, fitted against the target from one
+half of the probe set and scored against the other half.
+
+| epoch | radius | cos(uniform pool mean, target): pool 128 / 512 / 2048 | cos(fitted combination, held-out target): pool 128 / 512 / 2048 | ceiling (target half A vs half B) |
+|---|---|---|---|---|
+| 4 | 2/255 | 0.69 / 0.77 / 0.83 | 0.90 / 0.92 / 0.94 | 0.94 |
+| 4 | 8/255 | 0.20 / 0.37 / 0.46 | 0.80 / 0.89 / 0.94 | 0.98 |
+| 11 | 2/255 | 0.23 / 0.35 / 0.52 | 0.64 / 0.72 / 0.80 | 0.89 |
+| 11 | 8/255 | 0.15 / 0.24 / 0.28 | 0.58 / 0.70 / 0.79 | 0.98 |
+| 17 | 2/255 | 0.17 / 0.21 / 0.41 | 0.46 / 0.54 / 0.66 | 0.82 |
+| 17 | 8/255 | 0.12 / 0.10 / 0.15 | 0.43 / 0.55 / 0.67 | 0.96 |
+
+A non-negative combination of a few hundred clean-sample gradients reproduces
+most of the adversarial-training direction, far beyond what a uniform batch
+does, with the weight spread over roughly a quarter of the pool. So although no
+individual sample is "robustness-promoting" in a stable way, at every step there
+are *combinations* of clean samples whose joint update is.
+
+**Why this differs from the rules that failed.** Keeping the top half of a pool
+by an inner product rewards large gradients and whatever class the iterate
+currently under-predicts; the batch's mean gradient is then not the target
+direction, and the bias compounds. A least-squares fit matches the direction of
+the *sum*, so it is not rewarded for size and balances the classes itself.
+
+**Closed loop** (`gm_smoke`: SmallCNN, uniform for epoch 1, then
+`GradientMatchSampler` with 512 candidates, target = adversarial gradient at
+8/255 of 256 other training samples, batch 128; val, PGD-10):
+
+| epoch | clean | @2/255 | @4/255 | @8/255 | AUC |
+|---|---|---|---|---|---|
+| 1.00 (switch on) | 0.340 | 0.238 | 0.161 | 0.060 | 1.42 |
+| 1.33 | 0.337 | 0.285 | 0.232 | 0.146 | 1.90 |
+| 1.67 | 0.359 | 0.314 | 0.264 | 0.183 | 2.15 |
+| 2.00 | 0.373 | 0.315 | 0.267 | 0.174 | 2.15 |
+
+Sampler statistics over the second epoch: cosine of the returned batch's mean
+gradient with the target 0.92-0.94 (a plain batch of the same size: 0.31-0.42);
+its norm 1.4-1.5x a plain batch's; effective number of distinct samples in the
+batch 53-62 of 128; accuracy of the model on the selected samples 0.18-0.23
+(against 0.34 overall), i.e. it mostly picks samples the model currently gets
+wrong. Cost: 0.225 s per step against 0.022 s (uniform) and about 0.05 s
+(PGD-3 adversarial training).
+
+For scale: standard training never exceeds 0.09 at 8/255 and ends at 0.000;
+adversarial training at 4/255 has 0.156 at 8/255 after two epochs.
+
+A first version put the target samples among the candidates. A sample's clean
+gradient is trivially close to its own adversarial gradient, so the fit could
+score well by matching the target's sampling noise; the unit test caught it
+(the batch looked worse than a plain batch made of the target samples). Target
+samples are now always disjoint from candidates.
+
+Still to establish: that it holds to the end of training and over seeds (runs
+`p7_gm` queued), that the robustness survives stronger attacks (AutoAttack on
+`gm_smoke` queued), its accuracy-robustness curve against real adversarial
+training, cost reduction, other architectures and datasets.
