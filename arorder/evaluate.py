@@ -30,7 +30,7 @@ import torch
 from .attacks import margin, pgd_linf
 from .data import load_cifar10
 from .models import build_model
-from .train import TrainConfig, environment_info
+from .train import TrainConfig, environment_info, load_checkpoint
 
 
 @torch.no_grad()
@@ -63,7 +63,7 @@ def evaluate_checkpoint(run_dir: Path, split: str = "val", eps_list=(1.0, 2.0, 4
     ds = getattr(data, split)
     x, y = ds.batch(torch.arange(len(ds), device=dev))
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
-    model.load_state_dict(torch.load(Path(run_dir) / ckpt, map_location=dev)["model"])
+    model.load_state_dict(load_checkpoint(Path(run_dir) / ckpt, map_location=dev)["model"])
     model.eval()
     res = {"split": split, "n": len(ds), "clean_acc": (_margins(model, x, y, 1000) > 0).float().mean().item(),
            "attack": f"worst case over {restarts} restarts x (CE, margin) PGD-{steps}", "env": environment_info()}

@@ -68,7 +68,7 @@ from .attacks import pgd_linf
 from .data import load_cifar10
 from .models import build_model, flat_params, set_flat_params
 from .robustness import ProbeEvaluator
-from .train import TrainConfig, environment_info, lr_at
+from .train import TrainConfig, environment_info, load_checkpoint, lr_at
 
 
 def per_sample_gradient_products(model, x, y, vectors: torch.Tensor, chunk: int = 250, other=None):
@@ -232,7 +232,7 @@ def investigate_checkpoint(
     data = load_cifar10(dev)
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
     ckpt_name = "ckpt_final.pt" if step < 0 else f"ckpt_{step:06d}.pt"
-    ckpt = torch.load(Path(run_dir) / ckpt_name, map_location=dev)
+    ckpt = load_checkpoint(Path(run_dir) / ckpt_name, map_location=dev)
     model.load_state_dict(ckpt["model"])
     model.eval()
     step = ckpt["step"]

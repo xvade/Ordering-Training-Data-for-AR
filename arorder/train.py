@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import os
 import socket
 import time
@@ -117,7 +118,9 @@ def lr_at(step: int, cfg: TrainConfig, steps_per_epoch: int, total_steps: int) -
     if step < warm:
         return cfg.lr * (step + 1) / warm
     frac = (step - warm) / max(1, total_steps - warm)
-    return cfg.lr * 0.5 * (1 + np.cos(np.pi * frac))
+    # Plain Python float: a numpy scalar would end up inside the optimiser state
+    # and make checkpoints unloadable with torch.load(weights_only=True).
+    return float(cfg.lr * 0.5 * (1 + math.cos(math.pi * frac)))
 
 
 def environment_info() -> dict:
@@ -134,6 +137,22 @@ def environment_info() -> dict:
 
 def save_checkpoint(path: Path, model, opt, step: int):
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step}, path)
+
+
+def load_checkpoint(path: Path, map_location=None) -> dict:
+    """Load a checkpoint written by :func:`save_checkpoint`.
+
+    Checkpoints hold only tensors and plain Python numbers and are loaded with
+    ``weights_only=True``. Checkpoints written before 2026-11-15 11:40 contain a
+    numpy scalar (the learning rate) in the optimiser state, which the safe
+    loader rejects; for those we fall back to full unpickling. Only do that with
+    checkpoints produced by this code base.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except Exception as err:  # legacy checkpoint with a numpy scalar
+        print(f"note: {Path(path).name} is a legacy checkpoint, loading with weights_only=False ({type(err).__name__})")
+        return torch.load(path, map_location=map_location, weights_only=False)
 
 
 def make_optimizer(model, cfg: TrainConfig):
@@ -171,7 +190,7 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
     if sampler is None and cfg.sampler == "uniform":
         sampler = UniformSampler(n, cfg.batch_size, seed=cfg.seed + 2, device=dev)
     elif sampler is None:
-        scorer = build_scorer(cfg.sampler, **json.loads(cfg.sampler_args))
+        scorer = build_scorer(cfg.sampler, data=data, **json.loads(cfg.sampler_args))
         sampler = PoolFilterSampler(data.train, cfg.batch_size, cfg.pool_mult, scorer,
                                     start_step=int(cfg.select_start_epoch * steps_per_epoch), seed=cfg.seed + 2)
 

@@ -167,3 +167,28 @@ def test_band_scorer_prefers_middle_of_pool(toy):
     kept = Band(score_loss, q=0.5)(model, x, y, 0).topk(8).indices
     ranks = raw.argsort().argsort()[kept]
     assert ranks.min() >= 7 and ranks.max() <= 16
+
+
+def test_probe_gradient_scorer_direction_and_scores(toy):
+    from arorder.samplers import ProbeGradientScorer
+
+    model, x, y = toy
+
+    class Probe:  # minimal stand-in for GPUData
+        device = DEV
+
+        def __len__(self):
+            return 12
+
+        def batch(self, idx, augment=False, generator=None):
+            return x[:12][idx], y[:12][idx]
+
+    scorer = ProbeGradientScorer(Probe(), eps=2.0, pgd_steps=2, probe_batch=12, mode="rob")
+    scores = scorer(model, x[12:], y[12:], step=0)
+    # "rob" direction is orthogonal to the clean probe gradient ...
+    g_clean = batch_gradient(model, x[:12], y[:12])
+    cos = (scorer.direction @ g_clean) / (scorer.direction.norm() * g_clean.norm())
+    assert abs(cos.item()) < 1e-3
+    # ... and scores are the per-sample gradient products with it.
+    dots, _ = per_sample_gradient_products(model, x[12:], y[12:], scorer.direction[None])
+    assert torch.allclose(scores, dots[:, 0], rtol=1e-3, atol=1e-5)

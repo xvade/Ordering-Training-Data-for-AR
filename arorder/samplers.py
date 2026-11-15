@@ -174,27 +174,89 @@ class Band:
         return -(ranks - self.q).abs()
 
 
+class ProbeGradientScorer:
+    """Score candidates by their first-order effect on held-out robustness.
+
+    Every ``refresh_every`` steps the gradients of the clean loss and of the
+    adversarial loss (PGD at radius ``eps``, in 1/255) are computed on
+    ``probe_batch`` held-out probe points. A candidate ``i`` with training
+    gradient ``g_i`` then gets (higher = preferred, i.e. training on it lowers
+    the quantity in question to first order):
+
+    * ``mode="adv"``:   ``<g_i, g_adv>``, held-out adversarial loss;
+    * ``mode="clean"``: ``<g_i, g_clean>``, held-out clean loss;
+    * ``mode="gap"``:   ``<g_i, g_adv - g_clean>``, the adversarial-minus-clean gap;
+    * ``mode="rob"``:   ``<g_i, r>`` with ``r`` the part of ``g_adv`` orthogonal
+      to ``g_clean``: adversarial loss at unchanged clean loss.
+
+    The inner products are computed for the whole candidate pool with one
+    forward-mode pass per direction (:func:`directional_derivatives`).
+
+    Only the *choice* of samples uses the probe set; the weights are still
+    updated with ordinary clean-sample gradients.
+    """
+
+    def __init__(self, probe, eps: float = 2.0, pgd_steps: int = 5, probe_batch: int = 1000,
+                 refresh_every: int = 10, mode: str = "rob", seed: int = 0):
+        assert mode in ("adv", "clean", "gap", "rob")
+        self.probe, self.eps, self.pgd_steps = probe, eps / 255, pgd_steps
+        self.probe_batch, self.refresh_every, self.mode = min(probe_batch, len(probe)), refresh_every, mode
+        self.gen = torch.Generator(device="cpu").manual_seed(seed)
+        self.direction, self._last_refresh = None, None
+
+    def _flat_grad(self, model, x, y):
+        params = [p for p in model.parameters() if p.requires_grad]
+        grads = torch.autograd.grad(F.cross_entropy(model(x), y), params)
+        return torch.cat([g.reshape(-1) for g in grads])
+
+    def refresh(self, model) -> None:
+        """Recompute the scoring direction on a fresh random probe mini-batch."""
+        idx = torch.randperm(len(self.probe), generator=self.gen)[: self.probe_batch].to(self.probe.device)
+        x, y = self.probe.batch(idx)
+        g_clean = self._flat_grad(model, x, y)
+        if self.mode == "clean":
+            self.direction = g_clean
+            return
+        g_adv = self._flat_grad(model, pgd_linf(model, x, y, self.eps, steps=self.pgd_steps, keep_best=False), y)
+        if self.mode == "adv":
+            self.direction = g_adv
+        elif self.mode == "gap":
+            self.direction = g_adv - g_clean
+        else:
+            self.direction = g_adv - (g_adv @ g_clean) / (g_clean @ g_clean).clamp_min(1e-30) * g_clean
+
+    def __call__(self, model, x, y, step):
+        if self.direction is None or step - self._last_refresh >= self.refresh_every:
+            self.refresh(model)
+            self._last_refresh = step
+        return directional_derivatives(model, x, y, self.direction[None])[:, 0]
+
+
+# Factories take the DataBundle (for scorers that need held-out data) and keyword arguments.
 _BASE_SCORERS = {
-    "loss": lambda **kw: score_loss,
-    "margin": lambda **kw: score_margin,
-    "lin_radius": lambda **kw: score_lin_radius,
-    "adv_margin": lambda **kw: AdvMarginScorer(**kw),
+    "loss": lambda data, **kw: score_loss,
+    "margin": lambda data, **kw: score_margin,
+    "lin_radius": lambda data, **kw: score_lin_radius,
+    "adv_margin": lambda data, **kw: AdvMarginScorer(**kw),
+    "probe_grad": lambda data, **kw: ProbeGradientScorer(data.probe, **kw),
 }
 
 
-def build_scorer(name: str, **kw):
+def build_scorer(name: str, data=None, **kw):
     """Build a scorer from a name such as ``"loss:low"``, ``"margin:high"`` or ``"loss:band"``.
 
     The part before the colon picks the quantity (``loss``, ``margin``,
-    ``lin_radius``, ``adv_margin``); the part after picks which end of the pool
+    ``lin_radius``, ``adv_margin``, ``probe_grad``); the part after picks which end of the pool
     is kept: ``high``, ``low`` or ``band`` (closest to pool quantile ``q``,
-    default the median). Extra keyword arguments go to the quantity's scorer.
+    default the median). ``data`` is the :class:`arorder.data.DataBundle`, needed
+    by scorers that use held-out points (``probe_grad``). Extra keyword
+    arguments go to the quantity's scorer.
     """
     base_name, _, mode = name.partition(":")
     q = kw.pop("q", 0.5)
     if base_name not in _BASE_SCORERS:
         raise ValueError(f"unknown scorer {base_name!r}; known: {sorted(_BASE_SCORERS)}")
-    base = _BASE_SCORERS[base_name](**kw)
+    base = _BASE_SCORERS[base_name](data, **kw)
     if mode in ("", "high"):
         return base
     if mode == "low":
