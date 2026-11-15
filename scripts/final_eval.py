@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from arorder.evaluate import evaluate_checkpoint
+from arorder.evaluate import eval_file_name, evaluate_checkpoint
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 p.add_argument("runs", nargs="+")
@@ -27,6 +27,8 @@ p.add_argument("--eps", type=float, nargs="+", default=[1.0, 2.0, 4.0, 8.0])
 p.add_argument("--autoattack", action="store_true")
 p.add_argument("--ckpt", default="ckpt_final.pt")
 p.add_argument("--weights", default="raw", choices=["raw", "ema"])
+p.add_argument("--n", type=int, default=0, help="evaluate only the first n points of the split")
+p.add_argument("--seeds", type=int, nargs="*", default=None, help="restrict to these seeds")
 p.add_argument("--out", type=Path, required=True)
 a = p.parse_args()
 
@@ -37,12 +39,13 @@ for spec in a.runs:
         if not (run / a.ckpt).exists():
             print(f"skip {run}: no {a.ckpt}")
             continue
-        default = a.ckpt == "ckpt_final.pt" and a.weights == "raw"
-        f = run / (f"eval_{a.split}.json" if default else f"eval_{a.split}_{Path(a.ckpt).stem}_{a.weights}.json")
+        if a.seeds is not None and int(run.name[4:]) not in a.seeds:
+            continue
+        f = run / eval_file_name(a.split, a.ckpt, a.weights, a.n)
         res = json.loads(f.read_text()) if f.exists() else None
         if res is None or (a.autoattack and not any(k.startswith("autoattack") for k in res)) \
                 or any(f"robust_acc@{e:g}" not in res for e in a.eps):
-            res = evaluate_checkpoint(run, a.split, a.eps, autoattack=a.autoattack, ckpt=a.ckpt, weights=a.weights)
+            res = evaluate_checkpoint(run, a.split, a.eps, autoattack=a.autoattack, ckpt=a.ckpt, weights=a.weights, n=a.n)
         rows.append(dict(label=label, run=str(run), **{k: v for k, v in res.items() if isinstance(v, (int, float))}))
         print(f"{label} {run.name}: " + " ".join(f"{k}={v:.3f}" for k, v in rows[-1].items() if isinstance(v, float)), flush=True)
 df = pd.DataFrame(rows)
