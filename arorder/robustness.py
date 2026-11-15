@@ -130,15 +130,43 @@ class ProbeEvaluator:
             res["per_example"] = ex
         return res
 
-    def loss_gradient(self, model, eps: float, kind: str = "ce") -> torch.Tensor:
+    def lin_radius_gradient(self, model, cap: float = 16.0) -> torch.Tensor:
+        """Gradient w.r.t. the weights of ``-mean(linearised radius)`` (1/255 units).
+
+        The linearised radius ``margin / ||d margin / d x||_1`` does not change
+        when all logits are rescaled, so unlike a loss it cannot be improved by
+        becoming less confident. Radii are clipped to ``[-cap, cap]``.
+        Differentiating it needs a second backward pass through the input
+        gradient. Returned as a "loss" gradient: stepping against it raises the
+        mean radius.
+        """
+        was_training = model.training
+        model.eval()
+        params = [p for p in model.parameters() if p.requires_grad]
+        total = [torch.zeros_like(p) for p in params]
+        for x, y, _ in self._batches():
+            x = x.clone().requires_grad_(True)
+            m = margin(model(x), y)
+            (g,) = torch.autograd.grad(m.sum(), x, create_graph=True)
+            r = 255 * m / g.abs().flatten(1).sum(1).clamp_min(1e-12)
+            for t, gr in zip(total, torch.autograd.grad(-r.clamp(-cap, cap).sum(), params)):
+                t += gr
+        model.train(was_training)
+        return torch.cat([t.reshape(-1) for t in total]) / len(self)
+
+    def loss_gradient(self, model, eps: float, kind: str = "ce", temperature: float = 1.0) -> torch.Tensor:
         """Gradient w.r.t. the weights of the mean probe loss at radius ``eps``.
 
         By Danskin's theorem the gradient of the worst-case loss is the gradient
         of the loss at the (fixed) worst-case inputs, so this runs PGD and then
         differentiates the loss at the adversarial points. ``eps = 0`` gives the
-        clean-loss gradient. ``kind`` is ``"ce"`` or ``"neg_margin"`` (mean of
+        clean-loss gradient. ``kind`` is ``"ce"``, ``"neg_margin"`` (mean of
         ``-margin`` clipped to at most 10, so a few very confident points do not
-        dominate).
+        dominate) or ``"serr"``: a smoothed error rate,
+        ``mean(sigmoid(-margin / temperature))``. With ``temperature``
+        proportional to the typical margin, ``serr`` is insensitive to logit
+        scale and is driven by points near the decision boundary, i.e. it tracks
+        (robust) accuracy rather than confidence.
 
         Returns one flat vector in ``named_parameters`` order.
         """
@@ -151,6 +179,8 @@ class ProbeEvaluator:
             logits = model(xa)
             if kind == "ce":
                 obj = F.cross_entropy(logits, y, reduction="sum")
+            elif kind == "serr":
+                obj = torch.sigmoid(-margin(logits, y) / temperature).sum()
             else:
                 obj = (-margin(logits, y).clamp(max=10.0)).sum()
             for t, g in zip(total, torch.autograd.grad(obj, params)):

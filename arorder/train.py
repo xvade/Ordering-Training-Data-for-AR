@@ -25,6 +25,7 @@ Outputs in ``run_dir``:
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import json
 import math
@@ -67,6 +68,16 @@ class TrainConfig:
     pool_mult: float = 2.0          # candidates per step as a multiple of batch_size
     select_start_epoch: float = 0.0  # selection is uniform before this epoch
     sampler_args: str = "{}"        # JSON keyword arguments for the scorer
+    # exponential moving average of the weights (0 disables). The average sits near
+    # the floor of the loss valley that the raw iterate oscillates across, so it
+    # is the less noisy place to measure a model; it is evaluated alongside the raw
+    # weights (metrics prefixed "ema_") and stored in checkpoints.
+    ema_decay: float = 0.0
+    # branching: start from a checkpoint and run only steps [start_step, stop_step)
+    # of the schedule (stop_step = 0 means "to the end")
+    init_ckpt: str = ""
+    start_step: int = 0
+    stop_step: int = 0
     # per-step probe measurement (0 disables)
     probe_every: int = 0
     probe_n: int = 1000  # number of probe points used for the per-step measurement
@@ -135,8 +146,18 @@ def environment_info() -> dict:
     }
 
 
-def save_checkpoint(path: Path, model, opt, step: int):
-    torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step}, path)
+def save_checkpoint(path: Path, model, opt, step: int, ema=None):
+    state = {"model": model.state_dict(), "opt": opt.state_dict(), "step": step}
+    if ema is not None:
+        state["ema"] = ema.state_dict()
+    torch.save(state, path)
+
+
+@torch.no_grad()
+def update_ema(ema, model, decay: float) -> None:
+    """``ema <- decay * ema + (1 - decay) * model`` for every parameter."""
+    for pe, pm in zip(ema.parameters(), model.parameters()):
+        pe.lerp_(pm, 1 - decay)
 
 
 def load_checkpoint(path: Path, map_location=None) -> dict:
@@ -182,10 +203,20 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
     model = model.to(memory_format=torch.channels_last)
     opt = make_optimizer(model, cfg)
+    ema = None
+    if cfg.init_ckpt:
+        state = load_checkpoint(Path(cfg.init_ckpt), map_location=dev)
+        model.load_state_dict(state["model"])
+        opt.load_state_dict(state["opt"])
+    if cfg.ema_decay > 0:
+        ema = copy.deepcopy(model).eval()
+        if cfg.init_ckpt and "ema" in state:
+            ema.load_state_dict(state["ema"])
 
     n = len(data.train)
     steps_per_epoch = n // cfg.batch_size
     total_steps = cfg.epochs * steps_per_epoch
+    first_step, last_step = cfg.start_step, cfg.stop_step or total_steps
     gen = torch.Generator(device=dev).manual_seed(cfg.seed + 1)  # augmentation RNG
     if sampler is None and cfg.sampler == "uniform":
         sampler = UniformSampler(n, cfg.batch_size, seed=cfg.seed + 2, device=dev)
@@ -203,12 +234,14 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
 
     log, evals = StepLog(), []
     t0 = time.time()
-    for step in range(total_steps + 1):
+    for step in range(first_step, last_step + 1):
         # --- measurements of the weights after `step` updates ---
         if probe_eval is not None and step % cfg.probe_every == 0:
             log.add_probe(step, probe_eval.evaluate(model))
-        if step % cfg.eval_every == 0 or step == total_steps:
+        if (step - first_step) % cfg.eval_every == 0 or step == last_step:
             ev = val_eval.evaluate(model)
+            if ema is not None:
+                ev.update({f"ema_{k}": v for k, v in val_eval.evaluate(ema).items()})
             ev.update(step=step, epoch=step / steps_per_epoch, elapsed=time.time() - t0)
             evals.append(ev)
             print(f"step {step:6d} ep {ev['epoch']:5.2f} | clean {ev['clean_acc']:.3f} "
@@ -217,8 +250,8 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
             (run_dir / "evals.json").write_text(json.dumps(evals, indent=1))
             log.save(run_dir / "steps.npz")
         if cfg.ckpt_every and step % cfg.ckpt_every == 0:
-            save_checkpoint(run_dir / f"ckpt_{step:06d}.pt", model, opt, step)
-        if step == total_steps:
+            save_checkpoint(run_dir / f"ckpt_{step:06d}.pt", model, opt, step, ema)
+        if step == last_step:
             break
 
         # --- one update ---
@@ -233,10 +266,12 @@ def train(cfg: TrainConfig, data: DataBundle | None = None, sampler=None) -> dic
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        if ema is not None:
+            update_ema(ema, model, cfg.ema_decay)
         log.add(idx, lr=lr, train_loss=loss.item(), train_acc=(logits.argmax(1) == y).float().mean().item(),
                 **(sampler.stats() if hasattr(sampler, "stats") else {}))
 
-    save_checkpoint(run_dir / "ckpt_final.pt", model, opt, total_steps)
+    save_checkpoint(run_dir / "ckpt_final.pt", model, opt, last_step, ema)
     log.save(run_dir / "steps.npz")
     meta["end"] = environment_info()
     meta["train_seconds"] = time.time() - t0

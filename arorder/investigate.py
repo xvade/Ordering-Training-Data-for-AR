@@ -161,27 +161,37 @@ def filter_rules(gains: dict, feats: dict, vec_gram: np.ndarray, names: list, mi
     * ``gain_rob``: lowers adversarial loss along the part of the adversarial
       gradient orthogonal to the clean gradient, i.e. robustness at (first
       order) no change in clean loss.
-    * ``cos_*``: the same, divided by the sample's gradient norm, so the rule
-      prefers a *direction* rather than a large gradient.
+    * ``cos_rob``: ``gain_rob`` divided by the sample's gradient norm, so the
+      rule prefers a *direction* rather than a large gradient.
+    * ``gain_serr_adv`` / ``gain_serr_rob``: lowers the smoothed robust error
+      rate (and its part orthogonal to the smoothed clean error rate).
+    * ``gain_linr`` / ``gain_linr_rob``: raises the held-out linearised radius
+      (and the part of that orthogonal to the clean-loss gradient).
 
     Rules that use only the sample itself (cheap, need no held-out set):
-    ``low_loss``, ``high_loss``, ``low_grad_norm``, ``high_lin_radius``,
-    ``high_adv_margin``, ``low_adv_margin``, ``high_self_cos`` (the sample's
-    clean and adversarial gradients agree) and ``low_self_cos``.
+    ``low_loss``, ``high_loss``, ``high_lin_radius``, ``high_adv_margin``.
     """
     adv, clean = gains[f"probe_adv@{mid:g}"], gains["probe_clean"]
     ia, ic = names.index(f"probe_adv@{mid:g}"), names.index("probe_clean")
     beta = vec_gram[ia, ic] / vec_gram[ic, ic]  # projection coefficient of g_adv on g_clean
     norm = np.maximum(feats["grad_norm"], 1e-30)
+
+    def orth(a: str, b: str) -> np.ndarray:
+        """Gain along the part of direction ``a`` orthogonal to direction ``b``."""
+        i, j = names.index(a), names.index(b)
+        return gains[a] - vec_gram[i, j] / vec_gram[j, j] * gains[b]
+
     rules = {
         "gain_adv": adv, "gain_clean": clean, "gain_gap": adv - clean, "gain_rob": adv - beta * clean,
-        "low_loss": -feats["loss"], "high_loss": feats["loss"], "low_grad_norm": -feats["grad_norm"],
-        "high_lin_radius": feats["lin_radius"],
-        "high_adv_margin": feats[f"adv_margin@{mid:g}"], "low_adv_margin": -feats[f"adv_margin@{mid:g}"],
-        "high_self_cos": feats["self_cos"], "low_self_cos": -feats["self_cos"],
+        "low_loss": -feats["loss"], "high_loss": feats["loss"],
+        "high_lin_radius": feats["lin_radius"], "high_adv_margin": feats[f"adv_margin@{mid:g}"],
+        # scale-free robustness targets
+        "gain_serr_adv": gains[f"probe_serr_adv@{mid:g}"],
+        "gain_serr_rob": orth(f"probe_serr_adv@{mid:g}", "probe_serr_clean"),
+        "gain_linr": gains["probe_linr"],
+        "gain_linr_rob": orth("probe_linr", "probe_clean"),
     }
-    for k in ("adv", "clean", "gap", "rob"):
-        rules[f"cos_{k}"] = rules[f"gain_{k}"] / norm
+    rules["cos_rob"] = rules["gain_rob"] / norm
     return rules
 
 
@@ -197,6 +207,7 @@ def investigate_checkpoint(
     batch_size: int = 128,
     seed: int = 0,
     eta_mult: float = 0.25,
+    weights: str = "raw",
 ) -> None:
     """Run the full counterfactual study for one checkpoint and save one ``.npz``.
 
@@ -207,9 +218,10 @@ def investigate_checkpoint(
       the sample's clean and adversarial loss gradients at the middle radius)
       and ``feat/adv_grad_norm``.
     * ``gain/<Q>`` (N,): first-order gains ``<grad Q, grad loss_i>`` for ``Q`` in
-      ``probe_clean``, ``probe_adv@e`` (cross-entropy), ``probe_advm@e``
-      (clipped negative margin) and the same on ``val`` for clean and the
-      middle radius. Positive = training on the sample lowers ``Q``.
+      ``probe_clean``, ``probe_adv@e`` (cross-entropy), ``probe_serr_clean``
+      and ``probe_serr_adv@e`` (smoothed error rates), ``probe_linr`` (minus the
+      linearised radius), and ``val_clean`` / ``val_adv@e`` for the middle
+      radius. Positive = training on the sample lowers ``Q``.
     * ``vec_names`` and ``vec_gram``: names and Gram matrix of the held-out
       gradient directions (their norms and mutual alignment).
     * ``trial/*``: one row per real finite step.
@@ -233,7 +245,10 @@ def investigate_checkpoint(
     model = build_model(cfg.model, data.num_classes, width=cfg.width, norm=cfg.norm).to(dev)
     ckpt_name = "ckpt_final.pt" if step < 0 else f"ckpt_{step:06d}.pt"
     ckpt = load_checkpoint(Path(run_dir) / ckpt_name, map_location=dev)
-    model.load_state_dict(ckpt["model"])
+    # "raw" = the training iterate; "ema" = the weight average stored in the
+    # checkpoint (needs a run trained with ema_decay > 0), which sits near the
+    # valley floor and is free of the iterate's step-to-step oscillation.
+    model.load_state_dict(ckpt["ema" if weights == "ema" else "model"])
     model.eval()
     step = ckpt["step"]
     steps_per_epoch = len(data.train) // cfg.batch_size
@@ -257,7 +272,11 @@ def investigate_checkpoint(
     vec = {"probe_clean": probe_ev.loss_gradient(model, 0.0)}
     for e in score_eps:
         vec[f"probe_adv@{e:g}"] = probe_ev.loss_gradient(model, e / 255, "ce")
-        vec[f"probe_advm@{e:g}"] = probe_ev.loss_gradient(model, e / 255, "neg_margin")
+    # scale-free targets: smoothed (robust) error rate and the linearised radius
+    temp = float(probe_ev.evaluate(model, per_example=True)["per_example"]["clean_margin"].std())
+    vec["probe_serr_clean"] = probe_ev.loss_gradient(model, 0.0, "serr", temp)
+    vec[f"probe_serr_adv@{mid:g}"] = probe_ev.loss_gradient(model, mid / 255, "serr", temp)
+    vec["probe_linr"] = probe_ev.lin_radius_gradient(model)
     vec["val_clean"] = val_score_ev.loss_gradient(model, 0.0)
     vec[f"val_adv@{mid:g}"] = val_score_ev.loss_gradient(model, mid / 255, "ce")
     names = list(vec)
@@ -352,7 +371,7 @@ def investigate_checkpoint(
         out[f"noise/d/{k}"] = np.array([[r[k] for r in row] for row in seeds_d], np.float32)
 
     out["meta"] = np.array(json.dumps(dict(
-        step=int(step), epoch=step / steps_per_epoch, lr=float(lr), eta=float(eta), eta_mult=eta_mult,
+        step=int(step), epoch=step / steps_per_epoch, lr=float(lr), eta=float(eta), eta_mult=eta_mult, weights=weights,
         ref_step_len=ref_len, run_dir=str(run_dir), score_eps=list(score_eps), eval_eps=list(eval_eps),
         pgd_steps=pgd_steps, batch_size=batch_size, n_trials=len(trials),
         seconds_scores=t_scores, seconds_total=time.time() - t0, env=environment_info())))
@@ -371,8 +390,9 @@ if __name__ == "__main__":
     p.add_argument("--n-random", type=int, default=100)
     p.add_argument("--n-pools", type=int, default=30)
     p.add_argument("--eta-mult", type=float, default=0.25, help="base step size as a multiple of the learning rate")
+    p.add_argument("--weights", default="raw", choices=["raw", "ema"], help="study the raw iterate or the weight average")
     a = p.parse_args()
     for st in a.step:
         tag = "final" if st < 0 else f"{st:06d}"
         investigate_checkpoint(a.run_dir, st, (a.out_dir or a.run_dir / "investigate") / f"step_{tag}.npz",
-                               n_random=a.n_random, n_pools=a.n_pools, eta_mult=a.eta_mult)
+                               n_random=a.n_random, n_pools=a.n_pools, eta_mult=a.eta_mult, weights=a.weights)

@@ -192,3 +192,34 @@ def test_probe_gradient_scorer_direction_and_scores(toy):
     # ... and scores are the per-sample gradient products with it.
     dots, _ = per_sample_gradient_products(model, x[12:], y[12:], scorer.direction[None])
     assert torch.allclose(scores, dots[:, 0], rtol=1e-3, atol=1e-5)
+
+
+def test_lin_radius_gradient_predicts_radius_change(toy):
+    """A small step against the lin-radius gradient raises the mean linearised radius as predicted."""
+    model, x, y = toy
+    ev = ProbeEvaluator(x, y, [1 / 255], steps=2, seed=0)
+    g = ev.lin_radius_gradient(model)
+    theta, eta = flat_params(model), 1e-4 / g.norm().item()
+    before = (ev.linearized_radius(model) * 255).clamp(-16, 16).mean().item()
+    set_flat_params(model, theta - eta * g)
+    after = (ev.linearized_radius(model) * 255).clamp(-16, 16).mean().item()
+    set_flat_params(model, theta)
+    assert after - before == pytest.approx(eta * (g @ g).item(), rel=0.2)
+
+
+def test_smoothed_error_gradient_matches_finite_difference(toy):
+    model, x, y = toy
+    ev = ProbeEvaluator(x, y, [1 / 255], steps=2, seed=0)
+    g = ev.loss_gradient(model, 0.0, "serr", temperature=0.5)
+    theta, eta = flat_params(model), 1e-3 / g.norm().item()
+
+    def serr():
+        with torch.no_grad():
+            from arorder.attacks import margin as mg
+            return torch.sigmoid(-mg(model(x), y) / 0.5).mean().item()
+
+    before = serr()
+    set_flat_params(model, theta - eta * g)
+    after = serr()
+    set_flat_params(model, theta)
+    assert after - before == pytest.approx(-eta * (g @ g).item(), rel=0.2)

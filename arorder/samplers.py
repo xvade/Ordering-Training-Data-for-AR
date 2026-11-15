@@ -187,7 +187,14 @@ class ProbeGradientScorer:
     * ``mode="clean"``: ``<g_i, g_clean>``, held-out clean loss;
     * ``mode="gap"``:   ``<g_i, g_adv - g_clean>``, the adversarial-minus-clean gap;
     * ``mode="rob"``:   ``<g_i, r>`` with ``r`` the part of ``g_adv`` orthogonal
-      to ``g_clean``: adversarial loss at unchanged clean loss.
+      to ``g_clean``: adversarial loss at unchanged clean loss;
+    * ``mode="tilt"``:  ``<g_i, unit(g_clean) + lam * unit(r)>``: clean progress
+      tilted towards robustness. ``lam = 0`` is ``clean``; large ``lam``
+      approaches ``rob``.
+
+    ``source`` says where the two gradients are measured: ``"probe"`` (held-out
+    probe points, refreshed every ``refresh_every`` steps) or ``"pool"`` (the
+    candidate pool being scored, recomputed at every step, no held-out data).
 
     The inner products are computed for the whole candidate pool with one
     forward-mode pass per direction (:func:`directional_derivatives`).
@@ -197,8 +204,10 @@ class ProbeGradientScorer:
     """
 
     def __init__(self, probe, eps: float = 2.0, pgd_steps: int = 5, probe_batch: int = 1000,
-                 refresh_every: int = 10, mode: str = "rob", seed: int = 0):
-        assert mode in ("adv", "clean", "gap", "rob")
+                 refresh_every: int = 10, mode: str = "rob", lam: float = 1.0, source: str = "probe",
+                 seed: int = 0):
+        assert mode in ("adv", "clean", "gap", "rob", "tilt") and source in ("probe", "pool")
+        self.lam, self.source = lam, source
         self.probe, self.eps, self.pgd_steps = probe, eps / 255, pgd_steps
         self.probe_batch, self.refresh_every, self.mode = min(probe_batch, len(probe)), refresh_every, mode
         self.gen = torch.Generator(device="cpu").manual_seed(seed)
@@ -209,10 +218,11 @@ class ProbeGradientScorer:
         grads = torch.autograd.grad(F.cross_entropy(model(x), y), params)
         return torch.cat([g.reshape(-1) for g in grads])
 
-    def refresh(self, model) -> None:
-        """Recompute the scoring direction on a fresh random probe mini-batch."""
-        idx = torch.randperm(len(self.probe), generator=self.gen)[: self.probe_batch].to(self.probe.device)
-        x, y = self.probe.batch(idx)
+    def refresh(self, model, x=None, y=None) -> None:
+        """Recompute the scoring direction on ``(x, y)``, or on a fresh random probe mini-batch."""
+        if x is None:
+            idx = torch.randperm(len(self.probe), generator=self.gen)[: self.probe_batch].to(self.probe.device)
+            x, y = self.probe.batch(idx)
         g_clean = self._flat_grad(model, x, y)
         if self.mode == "clean":
             self.direction = g_clean
@@ -223,10 +233,16 @@ class ProbeGradientScorer:
         elif self.mode == "gap":
             self.direction = g_adv - g_clean
         else:
-            self.direction = g_adv - (g_adv @ g_clean) / (g_clean @ g_clean).clamp_min(1e-30) * g_clean
+            r = g_adv - (g_adv @ g_clean) / (g_clean @ g_clean).clamp_min(1e-30) * g_clean
+            if self.mode == "rob":
+                self.direction = r
+            else:
+                self.direction = g_clean / g_clean.norm().clamp_min(1e-30) + self.lam * r / r.norm().clamp_min(1e-30)
 
     def __call__(self, model, x, y, step):
-        if self.direction is None or step - self._last_refresh >= self.refresh_every:
+        if self.source == "pool":
+            self.refresh(model, x, y)
+        elif self.direction is None or step - self._last_refresh >= self.refresh_every:
             self.refresh(model)
             self._last_refresh = step
         return directional_derivatives(model, x, y, self.direction[None])[:, 0]
