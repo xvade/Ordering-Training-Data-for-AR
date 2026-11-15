@@ -246,3 +246,119 @@ train samples.
   command. Exported.
 * A unit test demanded bit-identical repeated PGD evaluations; cuDNN is not
   bit-reproducible, so it failed once in a while. Now uses a tolerance.
+
+## 2026-11-15 12:10-13:15 PST — Replay at averaged weights, more sweeps, planning agent
+
+Hardware: g3026/g3030-g3033 (Quadro RTX 6000, 4 CPUs per job); planner on n3432
+(cpu-g2, 4 CPUs, no GPU). Jobs: replay at averaged weights 43272835-37
+(`base_ema_s0/investigate`, 9 checkpoints, 60 random batches + 15 pools x 13 rules
+each); sweeps D 43272897 (`p2b`), E 43273186 (`p2c_branch7`), F 43273312-13
+(`p2d_linr`), G 43273677-78 (`p3_offset`, running); planner 43272890.
+Tables: `results/phase1/investigate_ema/`, `results/p2b`, `results/p2c_branch7`,
+`results/p2d_linr`.
+
+### A. What the averaged weights show over training (val, `base_ema_s0`)
+
+| epoch | clean | @2/255 | lin. radius | cos(clean grad, adv grad) | ‖adv grad‖ / ‖clean grad‖ | samples that help clean but hurt adv |
+|---|---|---|---|---|---|---|
+| 1 | 0.365 | 0.265 | 2.01 | 0.975 | 1.2 | 1.6% |
+| 3 | 0.524 | 0.347 | 2.16 | 0.925 | 1.5 | 2.2% |
+| 4 | 0.571 | 0.349 | 2.19 | 0.879 | 1.7 | 4.7% |
+| 6 | 0.653 | 0.320 | 1.72 | 0.768 | 2.2 | 8.6% |
+| 8 | 0.695 | 0.276 | 1.41 | 0.721 | 2.7 | 6.6% |
+| 11 | 0.745 | 0.231 | 1.25 | 0.539 | 3.9 | 10.2% |
+| 14 | 0.780 | 0.219 | 1.21 | 0.520 | 4.0 | 5.9% |
+| 17 | 0.794 | 0.192 | 1.15 | 0.376 | 4.8 | 9.9% |
+| 20 | 0.799 | 0.176 | 1.12 | 0.286 | 4.8 | 12.0% |
+
+(gradients are of the held-out loss, adversarial at 2/255, measured on `probe`)
+
+* **The direction that lowers clean loss and the direction that lowers
+  adversarial loss start out identical and separate steadily**: cosine 0.975
+  at epoch 1, 0.29 at epoch 20, while the adversarial gradient grows 2.2x and
+  the clean gradient shrinks. This is the cleanest single description of the
+  decay we have: late in training, making clean progress and making robust
+  progress are nearly unrelated directions, and training follows the first.
+* At the averaged weights a random step has the trajectory's signs from epoch 8
+  on (clean accuracy up, accuracy at 2/255 and boundary distance down), which it
+  does not at raw iterates. First-order predictions hold (R^2 0.93-0.99 at the
+  full base step) until the learning rate is nearly zero.
+* Per-sample gains are stable between checkpoints at the averaged weights (rank
+  correlation 0.5-0.85) but about a third of their variance is class
+  membership, and roughly half of all samples raise held-out clean loss.
+
+### B. Filter trials at averaged weights
+
+* Selecting by first-order benefit to the held-out **linearised radius**
+  (`gain_linr`, a scale-free target) raises the radius relative to random steps
+  at every checkpoint (equal step length: +0.009, +0.004, +0.003 at epochs 4, 8,
+  14; z = 5.5-12.5) with clean-accuracy progress equal to random at epochs 4 and
+  8. Easy-sample rules raise the radius as much but cancel clean progress.
+* The selected batches are not neutral in size: gradient-guided halves take
+  steps 1.4-2.7x longer than a random batch, easy halves 0.13-0.5x.
+
+### C. Full-training tests (3 seeds unless noted; val; raw / averaged weights agree at the end of a run)
+
+| variant | clean | @2/255 | @4/255 | AUC |
+|---|---|---|---|---|
+| uniform, 5 epochs | 0.597 | 0.312 | 0.114 | 1.58 |
+| uniform, 10 epochs | 0.702 | 0.221 | 0.035 | 1.23 |
+| uniform, 20 epochs | 0.797 | 0.171 | 0.012 | 1.14 |
+| uniform, 40 epochs | 0.841 | 0.106 | 0.004 | 1.00 |
+| class-balanced batches, 5 epochs (2 seeds) | 0.642 | 0.282 | 0.070 | 1.42 |
+| class-balanced batches, 10 epochs | 0.734 | 0.199 | 0.023 | 1.18 |
+| class-balanced batches, 20 epochs | 0.809 | 0.150 | 0.008 | 1.09 |
+| from epoch 7: keep easiest half | 0.594 | 0.263 | 0.069 | 1.33 |
+| from epoch 7: drop hardest quarter | 0.740 | 0.228 | 0.028 | 1.27 |
+| from epoch 7: drop the quarter nearest the boundary (2 seeds) | 0.736 | 0.220 | 0.024 | 1.24 |
+| keep best half by radius gain, scored on averaged weights | 0.436 | 0.231 | 0.103 | 1.24 |
+| keep best half by radius gain, scored on raw weights (2 seeds) | 0.358 | 0.161 | 0.075 | 0.92 |
+
+* **Class-balanced batches train faster and land on the same curve**, slightly
+  further along it (more accurate, less robust).
+* **Hard-sample rules are matched by training longer** (40 epochs: 0.841 / 0.106).
+* **Dropping the hardest quarter from epoch 7** ends at 0.740 / 0.228 / 1.27.
+  The uniform annealed endpoints interpolate to about 0.20 / 1.20 at that
+  accuracy, but the uniform run's own averaged weights mid-run reach about
+  0.24 there (planner, table D). So it beats "stop the cosine schedule earlier"
+  and not "take the averaged weights earlier".
+* **The radius-gain rule fails in closed loop** (0.44 clean after 20 epochs),
+  even though it was the best rule in one-step replay. Applied at every step
+  with a step ~1.5-2x longer and momentum on top, the same bias accumulates
+  coherently while the random part averages out. One-step replay, at raw or
+  averaged weights, is not a safe guide to what a rule does over thousands of
+  steps.
+
+### D. Planning agent (Fable, max effort) — `docs/plans/2026-11-15_phase2_plan.md`
+
+Ran inside its own Slurm allocation, re-analysed the raw files and ran two CPU
+pilots. Its conclusions that change the plan:
+
+1. Vulnerability is a **global loss of input-space margin**: between epochs 2
+   and 14 the margin of correct training points grows 2.8x while its
+   input-gradient norm grows 8x. Samples correct at every checkpoint lose
+   robustness too (accuracy at 2/255: 0.80 to 0.49).
+2. It is **class-structured**: 94% of the 2/255 accuracy lost between epochs 4
+   and 14 is lost in the seven easier classes while bird/cat/deer are being
+   learned; the selection rules tried so far are class reweightings in disguise
+   (the high-loss half of a pool is 18% cats, 4.5% cars).
+3. **Weight-space operations move off the curve; no data rule has**: averaged
+   weights taken mid-run, and interpolation between the epoch-4 average and the
+   final weights (0.728 clean / 0.315 at 2/255 against 0.262 on the averaged
+   path; one run).
+4. The final learning-rate anneal is the most expensive phase: 1.5-3.0 points of
+   2/255 accuracy lost per point of clean accuracy gained, against 0.5-1.1 before.
+5. **A run's offset from the curve is set early and persists** (mid-run offset
+   predicts late offset, r = 0.91 over ten runs; three uniform branches from one
+   epoch-7 checkpoint end within 0.006 of each other), and in its pilot **the
+   data order alone, from identical initial weights, moves that offset** (three
+   orders span 0.038 in 2/255 accuracy).
+6. Recommendation: (a) lookahead order selection in the early window, (b) class
+   exposure as the second lever, (c) a fair reference curve built from
+   averaging, early stopping and interpolation, (d) adversarial training as a
+   separate track, since standard training cannot produce a model with
+   non-trivial accuracy at 8/255 whatever the sampler does.
+
+Decisions taken: implement lookahead order selection (done: `Trainer.lookahead_segment`),
+run the order-vs-initialisation experiment (sweep G), and open the
+adversarial-training track with gate runs (`p5_at`).
