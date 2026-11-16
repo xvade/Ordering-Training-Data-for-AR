@@ -1,0 +1,122 @@
+{
+ "uniform@0.55": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_uniform",
+  "kind": "epoch",
+  "epoch": 4.0,
+  "step": 1404,
+  "seeds": 2,
+  "clean": 0.5506666600704193,
+  "clean_sd": 0.00033333897590637207,
+  "rob": 0.28716665506362915,
+  "rob_sd": 0.0011666715145111084,
+  "weights": "ema"
+ },
+ "uniform@0.6": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_uniform",
+  "kind": "epoch",
+  "epoch": 5.0,
+  "step": 1755,
+  "seeds": 2,
+  "clean": 0.6021666526794434,
+  "clean_sd": 0.00516664981842041,
+  "rob": 0.2628333270549774,
+  "rob_sd": 0.01449999213218689,
+  "weights": "ema"
+ },
+ "uniform@0.65": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_uniform",
+  "kind": "epoch",
+  "epoch": 7.0,
+  "step": 2457,
+  "seeds": 2,
+  "clean": 0.6859999895095825,
+  "clean_sd": 0.009000003337860107,
+  "rob": 0.19583333283662796,
+  "rob_sd": 0.02616667002439499,
+  "weights": "ema"
+ },
+ "uniform@0.7": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_uniform",
+  "kind": "epoch",
+  "epoch": 8.0,
+  "step": 2808,
+  "seeds": 2,
+  "clean": 0.7183333039283752,
+  "clean_sd": 0.008333325386047363,
+  "rob": 0.1784999966621399,
+  "rob_sd": 0.013166666030883789,
+  "weights": "ema"
+ },
+ "uniform@0.75": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_uniform",
+  "kind": "epoch",
+  "epoch": 10.0,
+  "step": 3510,
+  "seeds": 2,
+  "clean": 0.765999972820282,
+  "clean_sd": 0.006666660308837891,
+  "rob": 0.1693333312869072,
+  "rob_sd": 0.0016666725277900696,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.55": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_gm_e2",
+  "kind": "epoch",
+  "epoch": 11.0,
+  "step": 3861,
+  "seeds": 2,
+  "clean": 0.6913333237171173,
+  "clean_sd": 0.006000012159347534,
+  "rob": 0.3841666579246521,
+  "rob_sd": 0.015166670083999634,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.6": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_gm_e2",
+  "kind": "epoch",
+  "epoch": 11.0,
+  "step": 3861,
+  "seeds": 2,
+  "clean": 0.6913333237171173,
+  "clean_sd": 0.006000012159347534,
+  "rob": 0.3841666579246521,
+  "rob_sd": 0.015166670083999634,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.65": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_gm_e2",
+  "kind": "epoch",
+  "epoch": 11.0,
+  "step": 3861,
+  "seeds": 2,
+  "clean": 0.6913333237171173,
+  "clean_sd": 0.006000012159347534,
+  "rob": 0.3841666579246521,
+  "rob_sd": 0.015166670083999634,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.7": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_gm_e2",
+  "kind": "epoch",
+  "epoch": 12.0,
+  "step": 4212,
+  "seeds": 2,
+  "clean": 0.7086666822433472,
+  "clean_sd": 0.004999995231628418,
+  "rob": 0.3739999979734421,
+  "rob_sd": 0.015666678547859192,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.75": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/rn20_gm_e2",
+  "kind": "epoch",
+  "epoch": 16.0,
+  "step": 5616,
+  "seeds": 2,
+  "clean": 0.7515000104904175,
+  "clean_sd": 0.015500009059906006,
+  "rob": 0.3348333239555359,
+  "rob_sd": 0.010166674852371216,
+  "weights": "ema"
+ }
+}

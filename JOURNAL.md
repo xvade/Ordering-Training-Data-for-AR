@@ -526,3 +526,112 @@ the full space against a held-out target (512 candidates, 8/255, epoch 4 / 11 of
 0.59 / 0.28; uniform batch 0.41 / 0.20. A few thousand random coordinates per
 sample are enough, the last layer is not. `GradientMatchSampler(n_coords=...)`
 implements this for models too large to hold full per-sample gradients.
+
+## 2026-11-15 14:30-16:40 PST — Gradient matching: seeds, variants, controls, fair frontier, generalisation, test
+
+Hardware: g3026-g3037, Quadro RTX 6000, 4 CPUs per job (analysis on cpu-g2). Run
+roots: `p7_gm` (gradient-matching variants), `p8_general` (ResNet-20, CIFAR-100,
+BatchNorm), `p9_ref` (uniform references with per-epoch checkpoints: default,
+lr 0.025 / 0.1, weight decay 0 / 2e-3, batch 64; adversarial training at 2/255).
+Tables: `results/final/`, `results/p7_gm/`, `results/p8_general/`.
+
+Provenance note: from 14:55 every run records the code revision in `meta.json`
+(`start.git`). Runs started before that do not. The sampler was edited while
+jobs were queued (capped fit 13:58, coordinate subsets 14:05, adaptive radius
+14:38, uniform fraction 14:50); all edits kept the default path
+(`max_repeat=0`, single `eps`, `uniform_frac=0`) unchanged, and the unit tests
+passed after each (22, 25, 26, 27, 28 tests), but the exact file a given
+`p7_gm`/`p8_general` run imported is only known from its start time in
+`meta.json`.
+
+### A. Variants (val, end of training, 20 epochs; averaged = raw at the end)
+
+| variant | seeds | clean | 2/255 | AUC | note |
+|---|---|---|---|---|---|
+| target 2/255 (default) | 3 | 0.730 +- 0.009 | 0.289 +- 0.002 | 1.50 +- 0.01 | very small spread over seeds |
+| target 1/255 | 1 | 0.766 | 0.291 | 1.52 | higher accuracy, same robustness |
+| target 2/255, 1024 candidates | 1 | 0.725 | 0.288 | 1.52 | a larger pool does not help |
+| target 2/255, fit on 8,192 gradient coordinates | 1 | 0.729 | 0.276 | 1.45 | works in closed loop, slightly weaker |
+| target 2/255, no repeats in a batch | 1 | 0.739 | 0.286 | 1.48 | no better |
+| target 4/255 | 1 | 0.581 | 0.257 | 1.31 | late collapse |
+| target 4/255, no repeats | 1 | 0.672 | 0.203 | 1.16 | cap weakens the match |
+| target 4/255, half of each batch uniform | 1 | 0.761 | 0.252 | 1.37 | no collapse |
+| target 8/255 | 3 | 0.385 +- 0.045 | 0.214 +- 0.018 | 1.16 | late collapse |
+| target 8/255: 256 / 1024 candidates, probe target, from step 0, mixed target | 1 each | 0.35-0.57 | 0.21-0.25 | 1.11-1.33 | all collapse |
+| target 8/255, no repeats | 1 | 0.641 | 0.159 | 0.99 | cap weakens the match |
+| target 8/255, half of each batch uniform | 1 | 0.749 | 0.236 | 1.32 | no collapse, robustness at 8/255 not kept |
+| **control: same sampler, clean target** | 2 | on/below the uniform curve (table B) | | | the gain needs the adversarial direction |
+
+Nothing tried keeps robustness at 8/255 to the end of training. Stopped looking;
+it is reported as a limit.
+
+### B. The fair comparison (val, PGD-10, averaged weights, 3 seeds unless noted)
+
+Best accuracy at 2/255 among operating points (variant x epoch, seed means) with
+clean accuracy at least the level (`scripts/matched_frontier.py`,
+`results/final/frontier_val_adv2.csv`):
+
+| clean at least | uniform, epochs only | uniform tuned (lr, weight decay, batch) | uniform tuned + weight interpolation | gradient matching 2/255 | clean-target control (2 seeds) | adversarial training 2/255 |
+|---|---|---|---|---|---|---|
+| 0.55 | 0.342 | 0.348 | 0.348 | **0.402** | 0.338 | 0.541 |
+| 0.60 | 0.325 | 0.338 | 0.338 | **0.402** | 0.323 | 0.541 |
+| 0.65 | 0.308 | 0.308 | 0.317 | **0.384** | 0.286 | 0.541 |
+| 0.70 | 0.260 | 0.263 | 0.297 | **0.351** | 0.245 | 0.540 |
+| 0.75 | 0.229 | 0.236 | 0.245 | (not reached with >= 2 seeds) | 0.203 | - |
+
+* Gradient matching is 0.054-0.067 above the best uniform recipe including
+  learning-rate, weight-decay and batch-size variants and interpolation of an
+  early with the final averaged model. Seed sd at the selected points: gradient
+  matching 0.002-0.007, uniform 0.006-0.028.
+* Tuning the uniform recipe moves its frontier by at most 0.013; interpolation
+  adds up to 0.034 at clean 0.70. The planner's interpolation finding
+  reproduces on three seeds.
+* The identical sampler with a clean target lands on or below the uniform curve:
+  the effect is the adversarial direction, not the concentration of the fit or
+  its longer steps.
+* Real adversarial training at 2/255 is 0.14-0.19 above gradient matching at
+  matched accuracy: choosing clean samples recovers roughly a third of what
+  training on attacked inputs gives.
+
+### C. Test split, strong attack (worst case over 3 restarts x 2 losses of PGD-50), averaged weights, 3 seeds
+
+Operating points were selected on val (table B) and evaluated once on test.
+
+| model | clean | 1/255 | 2/255 | 4/255 |
+|---|---|---|---|---|
+| gradient matching 2/255, epoch 6 | 0.609 +- 0.009 | 0.489 +- 0.005 | **0.375 +- 0.007** | 0.195 +- 0.005 |
+| uniform lr 0.025, epoch 5 (best uniform point at clean >= 0.60) | 0.610 +- 0.008 | 0.457 +- 0.008 | 0.314 +- 0.007 | 0.123 +- 0.010 |
+| gradient matching 2/255, epoch 9 | 0.656 +- 0.007 | 0.501 +- 0.004 | **0.354 +- 0.006** | 0.138 +- 0.010 |
+| uniform, epoch 6 | 0.653 +- 0.006 | 0.455 +- 0.021 | 0.280 +- 0.028 | 0.076 +- 0.023 |
+| gradient matching 2/255, epoch 13 | 0.703 +- 0.009 | 0.501 +- 0.001 | **0.320 +- 0.002** | 0.094 +- 0.005 |
+
+The remaining reference points (uniform lr 0.025 at epoch 10, the two
+interpolated models, final checkpoints, AutoAttack) are in the next entry.
+
+### D. Other architecture, other dataset (val, PGD-10, averaged weights, 2 seeds, uniform varied by epochs only)
+
+| setting | clean at least | uniform | gradient matching 2/255 |
+|---|---|---|---|
+| ResNet-20 (GroupNorm), CIFAR-10 | 0.60 | 0.263 | 0.384 |
+| | 0.70 | 0.178 | 0.374 |
+| | 0.75 | 0.169 | 0.335 |
+| SmallCNN, CIFAR-100 | 0.30 | 0.145 | 0.170 |
+| | 0.35 | 0.136 | 0.161 |
+
+End of training: ResNet-20 uniform 0.856 clean / 0.080 at 2/255; gradient
+matching 0.745 / 0.301 (seed 0). CIFAR-100 uniform 0.422 / 0.091; gradient
+matching 0.369 / 0.153. A ResNet-20 gradient-matching run takes 81 minutes
+(per-sample gradients of 512 candidates through 20 layers).
+
+### E. Reference: adversarial training at 2/255 (PGD-3), SmallCNN, 3 seeds
+
+0.699 +- 0.005 clean, 0.541 +- 0.007 at 2/255, about 0.37 at 4/255, 0.12 at 8/255.
+
+### F. Bug found: weight average and BatchNorm
+
+The averaged model copied parameters only, so a BatchNorm network's average
+kept its initial running statistics and scored chance (first BatchNorm pair,
+`p8_general/bn_*`: averaged clean 0.097-0.100 while raw was 0.82-0.85). Fixed
+(`update_ema` now averages floating-point buffers; unit test added) and the
+pair is being rerun as `bn2_*`. Raw weights of the first pair: uniform 0.853 /
+0.094, gradient matching 0.816 / 0.125 at the end of training.

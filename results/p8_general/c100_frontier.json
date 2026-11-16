@@ -35,18 +35,6 @@
   "rob_sd": 0.0038333311676979065,
   "weights": "ema"
  },
- "uniform@0.4": {
-  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_uniform",
-  "kind": "epoch",
-  "epoch": 15.0,
-  "step": 5265,
-  "seeds": 2,
-  "clean": 0.4064999967813492,
-  "clean_sd": 0.0031666606664657593,
-  "rob": 0.11299999803304672,
-  "rob_sd": 0.010999999940395355,
-  "weights": "ema"
- },
  "grad-match 2/255@0.25": {
   "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_gm_e2",
   "kind": "epoch",
