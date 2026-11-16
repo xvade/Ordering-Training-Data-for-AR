@@ -1,0 +1,86 @@
+{
+ "uniform@0.25": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_uniform",
+  "kind": "epoch",
+  "epoch": 8.0,
+  "step": 2808,
+  "seeds": 2,
+  "clean": 0.3044999986886978,
+  "clean_sd": 0.005833342671394348,
+  "rob": 0.14549999684095383,
+  "rob_sd": 0.0015000030398368835,
+  "weights": "ema"
+ },
+ "uniform@0.3": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_uniform",
+  "kind": "epoch",
+  "epoch": 8.0,
+  "step": 2808,
+  "seeds": 2,
+  "clean": 0.3044999986886978,
+  "clean_sd": 0.005833342671394348,
+  "rob": 0.14549999684095383,
+  "rob_sd": 0.0015000030398368835,
+  "weights": "ema"
+ },
+ "uniform@0.35": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_uniform",
+  "kind": "epoch",
+  "epoch": 11.0,
+  "step": 3861,
+  "seeds": 2,
+  "clean": 0.35883332788944244,
+  "clean_sd": 0.005500003695487976,
+  "rob": 0.13616666942834854,
+  "rob_sd": 0.0038333311676979065,
+  "weights": "ema"
+ },
+ "uniform@0.4": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_uniform",
+  "kind": "epoch",
+  "epoch": 15.0,
+  "step": 5265,
+  "seeds": 2,
+  "clean": 0.4064999967813492,
+  "clean_sd": 0.0031666606664657593,
+  "rob": 0.11299999803304672,
+  "rob_sd": 0.010999999940395355,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.25": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_gm_e2",
+  "kind": "epoch",
+  "epoch": 11.0,
+  "step": 3861,
+  "seeds": 2,
+  "clean": 0.3216666728258133,
+  "clean_sd": 0.0006666630506515503,
+  "rob": 0.17016666382551193,
+  "rob_sd": 0.0005000010132789612,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.3": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_gm_e2",
+  "kind": "epoch",
+  "epoch": 11.0,
+  "step": 3861,
+  "seeds": 2,
+  "clean": 0.3216666728258133,
+  "clean_sd": 0.0006666630506515503,
+  "rob": 0.17016666382551193,
+  "rob_sd": 0.0005000010132789612,
+  "weights": "ema"
+ },
+ "grad-match 2/255@0.35": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/c100_gm_e2",
+  "kind": "epoch",
+  "epoch": 15.0,
+  "step": 5265,
+  "seeds": 2,
+  "clean": 0.3553333431482315,
+  "clean_sd": 0.002666667103767395,
+  "rob": 0.1614999994635582,
+  "rob_sd": 0.0011666640639305115,
+  "weights": "ema"
+ }
+}
