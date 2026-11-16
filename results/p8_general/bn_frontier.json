@@ -1,0 +1,122 @@
+{
+ "uniform (BatchNorm)@0.6": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_uniform",
+  "kind": "epoch",
+  "epoch": 2.0,
+  "step": 702,
+  "seeds": 2,
+  "clean": 0.640666663646698,
+  "clean_sd": 0.0016666650772094727,
+  "rob": 0.3479999899864197,
+  "rob_sd": 0.01199999451637268,
+  "weights": "ema"
+ },
+ "uniform (BatchNorm)@0.65": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_uniform",
+  "kind": "epoch",
+  "epoch": 3.0,
+  "step": 1053,
+  "seeds": 2,
+  "clean": 0.7008333504199982,
+  "clean_sd": 0.007833331823348999,
+  "rob": 0.29733332991600037,
+  "rob_sd": 0.013666659593582153,
+  "weights": "ema"
+ },
+ "uniform (BatchNorm)@0.7": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_uniform",
+  "kind": "epoch",
+  "epoch": 3.0,
+  "step": 1053,
+  "seeds": 2,
+  "clean": 0.7008333504199982,
+  "clean_sd": 0.007833331823348999,
+  "rob": 0.29733332991600037,
+  "rob_sd": 0.013666659593582153,
+  "weights": "ema"
+ },
+ "uniform (BatchNorm)@0.75": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_uniform",
+  "kind": "epoch",
+  "epoch": 5.0,
+  "step": 1755,
+  "seeds": 2,
+  "clean": 0.7646666765213013,
+  "clean_sd": 0.0006666779518127441,
+  "rob": 0.24583333730697632,
+  "rob_sd": 0.0008333325386047363,
+  "weights": "ema"
+ },
+ "uniform (BatchNorm)@0.8": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_uniform",
+  "kind": "epoch",
+  "epoch": 7.0,
+  "step": 2457,
+  "seeds": 2,
+  "clean": 0.8009999692440033,
+  "clean_sd": 0.00033333897590637207,
+  "rob": 0.22449999302625656,
+  "rob_sd": 0.0011666640639305115,
+  "weights": "ema"
+ },
+ "grad-match 2/255 (BatchNorm)@0.6": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_gm_e2",
+  "kind": "epoch",
+  "epoch": 2.0,
+  "step": 702,
+  "seeds": 2,
+  "clean": 0.6159999966621399,
+  "clean_sd": 0.006333351135253906,
+  "rob": 0.41716666519641876,
+  "rob_sd": 0.00016666948795318604,
+  "weights": "ema"
+ },
+ "grad-match 2/255 (BatchNorm)@0.65": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_gm_e2",
+  "kind": "epoch",
+  "epoch": 3.0,
+  "step": 1053,
+  "seeds": 2,
+  "clean": 0.6629999876022339,
+  "clean_sd": 0.007333338260650635,
+  "rob": 0.398499995470047,
+  "rob_sd": 0.005833327770233154,
+  "weights": "ema"
+ },
+ "grad-match 2/255 (BatchNorm)@0.7": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_gm_e2",
+  "kind": "epoch",
+  "epoch": 5.0,
+  "step": 1755,
+  "seeds": 2,
+  "clean": 0.726833313703537,
+  "clean_sd": 0.005499988794326782,
+  "rob": 0.3621666580438614,
+  "rob_sd": 0.010166659951210022,
+  "weights": "ema"
+ },
+ "grad-match 2/255 (BatchNorm)@0.75": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_gm_e2",
+  "kind": "epoch",
+  "epoch": 6.0,
+  "step": 2106,
+  "seeds": 2,
+  "clean": 0.7503333389759064,
+  "clean_sd": 0.00533333420753479,
+  "rob": 0.3525000065565109,
+  "rob_sd": 0.005500003695487976,
+  "weights": "ema"
+ },
+ "grad-match 2/255 (BatchNorm)@0.8": {
+  "variant": "/gscratch/scrubbed/sgvtc/ordering-ar-runs/p8_general/bn2_gm_e2",
+  "kind": "epoch",
+  "epoch": 12.0,
+  "step": 4212,
+  "seeds": 2,
+  "clean": 0.8066666722297668,
+  "clean_sd": 0.009999990463256836,
+  "rob": 0.23133333027362823,
+  "rob_sd": 0.00466667115688324,
+  "weights": "ema"
+ }
+}

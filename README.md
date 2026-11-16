@@ -15,12 +15,29 @@ accuracy?
   curve that training longer or shorter already traces, or they break training.
 * What works is **gradient matching**: at every step, train on the combination
   of *clean* samples whose joint gradient points along the adversarial-training
-  direction. It is the only data-only rule we found that ends training above the
-  uniform-sampling trade-off curves, it does so consistently across seeds, and
-  the robustness holds under AutoAttack.
-* Data ordering alone does not replace adversarial training: robustness at
-  8/255 is gained early with a large target radius and then lost. Reference
-  numbers for real adversarial training on the same model are reported alongside.
+  direction. At matched clean accuracy it is the only data-only rule we found
+  that beats uniform sampling given every weight-space trick (tuned learning
+  rate, weight averaging, early stopping, interpolation). CIFAR-10 test split,
+  small CNN, strong attack at 2/255, 3 seeds: 0.375 against 0.314 at clean 0.61;
+  0.354 against 0.295 at clean 0.65; 0.320 against 0.276 at clean 0.70. Seed
+  spread is under one point, the gain holds under AutoAttack, the same sampler
+  aimed at the clean gradient gains nothing, and the gain carries over to
+  ResNet-20, BatchNorm and CIFAR-100.
+* Data ordering alone does not replace adversarial training. Real adversarial
+  training at 2/255 reaches 0.53 at clean 0.70 on the same model. No variant
+  keeps robustness at 8/255: with a large target radius it is gained early and
+  then lost. The sampler costs about 8x a plain training step (adversarial
+  training: 2.4x).
+
+![accuracy against robustness](results/final/frontier.png)
+
+**Recommended recipe.** Uniform sampling for one epoch, then gradient matching
+with a target radius of 2/255 (1/255 for more clean accuracy), weight averaging
+with decay 0.99, and use the *averaged weights before the learning-rate anneal*,
+at the epoch that reaches the clean accuracy you need (on the small CNN: epoch 6
+for 0.60, 9 for 0.65, 13 for 0.70). Trained checkpoints of the headline models
+are in `/gscratch/amath/sgvtc/ordering-ar/models/` (one tar per family, written
+by `scripts/archive_models.sh`).
 
 Status, plan and every experiment: [`TODO.md`](TODO.md), [`JOURNAL.md`](JOURNAL.md).
 
@@ -70,7 +87,7 @@ within a batch), `uniform_frac` (share of each batch drawn uniformly),
 | `arorder/samplers.py` | Uniform, class-balanced, pool-filter (score-based) and gradient-matching samplers. |
 | `arorder/investigate.py` | One-step replay study from a checkpoint: per-sample first-order effects on held-out robustness plus real finite steps and filter trials. |
 | `arorder/evaluate.py` | Strong-attack evaluation of a checkpoint (multi-restart PGD-50, AutoAttack). |
-| `scripts/` | Data preparation, sweeps (`sweep.py`), aggregation and plots (`aggregate.py`, `plot_frontier.py`), analyses (`analyze_*.py`), final evaluation (`final_eval.py`), Slurm wrappers (`slurm/`), environment (`env.sh`); one-off checks in `adhoc/`. |
+| `scripts/` | Data preparation, sweeps (`sweep.py`), aggregation and plots (`aggregate.py`, `plot_frontier.py`), comparison at matched clean accuracy (`matched_frontier.py`), weight-interpolation reference (`interp_eval.py`), analyses (`analyze_*.py`), final evaluation (`final_eval.py`), checkpoint archive (`archive_models.sh`), Slurm wrappers (`slurm/`), environment (`env.sh`); one-off checks in `adhoc/`. |
 | `tests/` | Unit tests of the measurement machinery, samplers and trainer. |
 | `results/` | Tables and figures copied out of the (purgeable) run directories. |
 | `docs/` | `FINDINGS.md` (what was learned), `KLONE.md` (the cluster), `plans/` (planning agent's brief and plan). |
@@ -99,6 +116,7 @@ sbatch --job-name=sweep scripts/slurm/run.slurm bash -c \
   (45,000 / 2,000 / 3,000). `probe` drives selection signals, `val` is for
   development, and the official test set is used only for final reporting.
 * Sample indices in logs are positions within the `train` split.
-* A method is judged against the uniform run's whole accuracy-robustness curve
-  (end points of runs of different lengths, and the averaged weights along a
-  run), not against one baseline number.
+* A method is judged against the uniform recipe's whole accuracy-robustness
+  frontier (tuned hyperparameters, any epoch of the averaged weights, weight
+  interpolation) at matched clean accuracy, not against one baseline number
+  (`scripts/matched_frontier.py`).

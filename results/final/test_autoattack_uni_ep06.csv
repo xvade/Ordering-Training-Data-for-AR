@@ -1,0 +1,2 @@
+label,run,n,clean_acc,robust_acc@2,robust_acc@4,auc,autoattack_acc@2,autoattack_acc@4
+"uniform, epoch 6",/gscratch/scrubbed/sgvtc/ordering-ar-runs/p9_ref/uniform_ck/seed0,2000,0.6565000414848328,0.3190000057220459,0.10950000584125519,1.4040000587701797,0.3095000088214874,0.09700000286102295

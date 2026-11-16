@@ -635,3 +635,54 @@ kept its initial running statistics and scored chance (first BatchNorm pair,
 (`update_ema` now averages floating-point buffers; unit test added) and the
 pair is being rerun as `bn2_*`. Raw weights of the first pair: uniform 0.853 /
 0.094, gradient matching 0.816 / 0.125 at the end of training.
+
+## 2026-11-15 16:40-17:15 PST — Extra seeds, remaining test references, AutoAttack, BatchNorm rerun, archive
+
+Hardware: g3026-g3037, Quadro RTX 6000, 4 CPUs per job (analysis and archiving
+on cpu-g2, 1 CPU). All runs here record their code revision in `meta.json`.
+
+**Seeds 3 and 4** for gradient matching 2/255, uniform default and uniform
+lr 0.025; seeds 1 and 2 for gradient matching 1/255. Five-seed validation
+frontier (`results/final/frontier5_val_*.csv`, accuracy at 2/255, PGD-10,
+averaged weights): clean >= 0.60: gradient matching 0.403 (sd 0.005) against
+uniform 0.331, with all tuning and interpolation 0.334; >= 0.65: 0.389 against
+0.317; >= 0.70: 0.340 (1/255 target: 0.343) against 0.297; >= 0.75: 1/255
+target 0.297 against 0.245. End of training, 5 seeds: 0.726 +- 0.009 clean,
+0.290 +- 0.004 at 2/255. Same ordering at 4/255 and for the area under the
+robust-accuracy curve. Figure: `results/final/frontier.png`.
+
+**Test split, strong attack, remaining references** (3 seeds unless noted):
+uniform lr 0.025 epoch 10: 0.710 clean / 0.242 at 2/255; uniform epoch-4 average
+interpolated half-way to the final weights: 0.653 / 0.295; uniform epoch-3
+average interpolated 0.75 of the way (5 seeds, the two new ones included):
+0.705 / 0.276. Against gradient matching at epochs 9 and 13: 0.656 / 0.354 and
+0.703 / 0.320. End-of-schedule models (`results/final/test_strong.csv`):
+uniform 20 epochs 0.795 / 0.146; gradient matching 2/255 0.728 / 0.261;
+adversarial training 8/255 0.519 / 0.449 and 0.269 at 8/255.
+
+**AutoAttack** (standard, first 2,000 test points, seed 0;
+`results/final/test_autoattack_*.csv`), accuracy at 2/255 and 4/255, with the
+PGD-50 worst case on the same points in brackets: gradient matching epoch 9
+averaged 0.359 (0.365), 0.138 (0.158); uniform epoch 6 averaged 0.310 (0.319),
+0.097 (0.110); gradient matching end 0.255 (0.267); uniform 20 epochs end 0.149
+(0.166); adversarial training 2/255 end 0.525 (0.529), 0.343 (0.356). No sign of
+gradient masking. The first test job (`finalA`, 43275689) also ran AutoAttack at
+2 and 8/255 on end-of-schedule models and agrees where they overlap; it was
+left to run into its 2 h limit.
+
+**BatchNorm, rerun with the fixed weight average** (`p8_general/bn2_*`, 2
+seeds, validation): accuracy at 2/255 at clean >= 0.60 / 0.70 / 0.75 / 0.80:
+uniform 0.348 / 0.297 / 0.246 / 0.224; gradient matching 0.417 / 0.362 / 0.353
+/ 0.231. End of training: uniform 0.858 / 0.088; gradient matching 0.803 /
+0.134. The gain survives eval-mode per-sample gradients; it is gone at 0.80.
+
+**Mistake caught**: `interp_eval.py` takes the run list before list-valued
+options (`--alphas 0.25 0.5 0.75 RUN` swallowed the run); first submission
+failed at argument parsing, usage text corrected.
+
+**Archive**: `scripts/archive_models.sh` wrote ten tar files (418 MB, one per
+family because the group fileset is at 95% of its file-count limit) to
+`/gscratch/amath/sgvtc/ordering-ar/models/`: configs, metadata, validation
+curves, test evaluations and the checkpoints at the selected epochs for
+gradient matching (2/255, 1/255), the uniform references, adversarial training
+(2/255, 8/255), ResNet-20 and CIFAR-100.

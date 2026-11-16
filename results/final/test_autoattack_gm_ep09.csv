@@ -1,0 +1,2 @@
+label,run,n,clean_acc,robust_acc@2,robust_acc@4,auc,autoattack_acc@2,autoattack_acc@4
+"grad-match 2/255, epoch 9",/gscratch/scrubbed/sgvtc/ordering-ar-runs/p7_gm/gm_e2/seed0,2000,0.656000018119812,0.3645000159740448,0.1575000137090683,1.54250006377697,0.35850000381469727,0.13750000298023224

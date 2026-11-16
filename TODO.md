@@ -9,36 +9,30 @@ for consistency and quality.
 Where things stand is summarised in `docs/FINDINGS.md`; every experiment is in
 `JOURNAL.md`.
 
-## Now
+## Open decision (the user's)
 
-- [ ] Finish the gradient-matching consistency runs (`p7_gm`: target 2/255, seeds
-      0-2; capped, larger-pool and half-uniform variants) and pick the default
-      configuration from them.
-- [ ] Generalisation runs (`p8_general`): ResNet-20 and CIFAR-100, uniform
-      against gradient matching, 2 seeds each.
-- [ ] Strong-attack evaluation on the untouched **test** split
-      (`scripts/final_eval.py`, PGD-50 worst case + AutoAttack) of the headline
-      models: uniform, gradient matching, real adversarial training.
-- [ ] Write the numbers into `docs/FINDINGS.md` and `README.md`; copy headline
-      checkpoints to `/gscratch/amath/sgvtc/ordering-ar/models/`.
+- [ ] Is training on attacked inputs in scope? Gradient matching trains on clean
+      samples only and recovers about a third of what adversarial training at
+      the same radius gives, at 3x its cost. If attacked inputs are allowed, the
+      ordering question worth asking is the one in FINDINGS section 6 (which
+      samples to attack and train on), where class-balanced batches and keeping
+      the low-adversarial-margin samples already help.
 
 ## Next
 
-- [ ] Stop the late collapse of gradient matching at large target radii. Open
-      leads: half-uniform batches (queued), a usage cap per epoch, an explicit
-      penalty on the part of the batch gradient orthogonal to the target.
-- [ ] 10 seeds for the headline comparison (3 seeds detect about 0.055 at 2/255
-      at 80% power; see the planner's power analysis).
-- [ ] BatchNorm models: per-sample gradients are taken in eval mode; check that
-      the match and the gain survive.
-- [ ] Cost: the sampler is ~8x a plain step on the small CNN. Options measured
-      or sketched: coordinate subsets (`n_coords`, measured to work), refreshing
-      the fit every k steps, smaller target sets.
-- [ ] Fair-frontier baseline from the planner (averaging + early stop +
-      interpolation of early and late averaged weights) with 3+ seeds.
-- [ ] Order of the early window: the planner's pilot says data order alone moves
-      a run's offset from the trade-off curve; sweep G (`p3_offset`) has the
-      data, not yet analysed properly.
+- [ ] Reach clean accuracy above 0.75 with the gain intact (target 1/255 gets to
+      0.75; longer schedules, or switching the target radius down late).
+- [ ] The late collapse at large target radii, and with it robustness at 8/255.
+      Tried without success: pool size, mixed target, held-out target, repeat
+      caps, half-uniform batches. Untried: a usage cap per epoch, a penalty on
+      the batch-gradient component orthogonal to the target.
+- [ ] Cost (8x a plain step). Coordinate subsets work (`n_coords`); untried:
+      refreshing the fit every k steps, smaller target sets.
+- [ ] Tuned uniform references (learning rate, interpolation) for ResNet-20 and
+      CIFAR-100; a deeper BatchNorm network; more than 2 seeds there.
+- [ ] AutoAttack on all seeds and the full test set for the headline pair.
+- [ ] Order of the early window: sweep G (`p3_offset`) has the data, not yet
+      analysed properly.
 - [ ] Larger models under adversarial training (ResNet-18), where robust
       overfitting appears and "which updates destroy robustness" has a second
       meaning.
@@ -46,8 +40,8 @@ Where things stand is summarised in `docs/FINDINGS.md`; every experiment is in
 ## Done
 
 - [x] 2026-11-15 Klone notes (`docs/KLONE.md`), environment, CIFAR-10 / CIFAR-100.
-- [x] 2026-11-15 Core library + unit tests (27): data, models, PGD, probe
-      evaluator, steppable trainer, samplers, strong evaluation.
+- [x] 2026-11-15 Core library + unit tests: data, models, PGD, probe evaluator,
+      steppable trainer, samplers, strong evaluation.
 - [x] 2026-11-15 Phase 1: instrumented baseline, one-step replay study at raw
       and averaged weights, characterisation (JOURNAL.md; planner's analysis in
       `docs/plans/2026-11-15_phase2_plan.md`).
@@ -55,6 +49,12 @@ Where things stand is summarised in `docs/FINDINGS.md`; every experiment is in
       band), class-balanced batches, top-k by held-out loss gradients, top-k by
       linearised-radius gain, one-epoch lookahead over data orders.
 - [x] 2026-11-15 Gradient matching: feasibility, sampler, closed-loop runs,
-      collapse diagnosis, AutoAttack sanity check.
-- [x] 2026-11-15 Adversarial-training reference runs and selection rules under
-      adversarial training.
+      variants, collapse diagnosis, clean-target control.
+- [x] 2026-11-15 Fair comparison at matched clean accuracy against tuned uniform
+      references with weight averaging and interpolation (5 seeds for the
+      headline pair); adversarial-training references at 2/255 and 8/255;
+      selection rules under adversarial training.
+- [x] 2026-11-15 Generalisation: ResNet-20, CIFAR-100, BatchNorm (after fixing
+      the weight average for BatchNorm statistics).
+- [x] 2026-11-15 Test-split confirmation with the strong attack and AutoAttack;
+      headline checkpoints archived to `/gscratch/amath/sgvtc/ordering-ar/models/`.
