@@ -204,9 +204,20 @@ def save_checkpoint(path: Path, model, opt, step: int, ema=None):
 
 @torch.no_grad()
 def update_ema(ema, model, decay: float) -> None:
-    """``ema <- decay * ema + (1 - decay) * model`` for every parameter."""
+    """``ema <- decay * ema + (1 - decay) * model`` for every parameter and floating-point buffer.
+
+    Buffers matter for BatchNorm: its running mean and variance are buffers, and
+    an averaged model that kept the initial statistics is useless (found on
+    2026-11-15: averaged BatchNorm models scored chance). Integer buffers
+    (BatchNorm's batch counter) are copied.
+    """
     for pe, pm in zip(ema.parameters(), model.parameters()):
         pe.lerp_(pm, 1 - decay)
+    for be, bm in zip(ema.buffers(), model.buffers()):
+        if be.is_floating_point():
+            be.lerp_(bm, 1 - decay)
+        else:
+            be.copy_(bm)
 
 
 def load_checkpoint(path: Path, map_location=None) -> dict:

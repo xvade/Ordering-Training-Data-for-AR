@@ -427,3 +427,16 @@ def test_gradient_match_uniform_fraction_reserves_plain_samples(tmp_path, tiny_d
     idx = s.next_batch(0, t.model)
     first16 = GradientMatchSampler(tiny_data.train, tiny_data.probe, 32, 4, target_n=64, seed=0).base.next_batch(0)[:16]
     assert len(idx) == 32 and set(first16.tolist()) <= set(idx.tolist())
+
+
+def test_ema_tracks_batchnorm_statistics(tmp_path, tiny_data):
+    from arorder.train import Trainer
+
+    t = Trainer(_tiny_cfg(tmp_path, norm="bn", ema_decay=0.5), data=tiny_data)
+    for _ in range(6):
+        t.train_step()
+    bn_model = [m for m in t.model.modules() if isinstance(m, torch.nn.BatchNorm2d)][0]
+    bn_ema = [m for m in t.ema.modules() if isinstance(m, torch.nn.BatchNorm2d)][0]
+    # the averaged model's running statistics have moved away from their initial values (mean 0, var 1)
+    assert bn_ema.running_mean.abs().max() > 1e-4 and not torch.allclose(bn_ema.running_var, torch.ones_like(bn_ema.running_var))
+    assert bn_ema.num_batches_tracked == bn_model.num_batches_tracked
