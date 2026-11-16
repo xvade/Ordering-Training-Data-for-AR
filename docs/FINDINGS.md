@@ -37,14 +37,26 @@ uniform runs of 5, 10, 20 and 40 epochs.*
    (learning rate, weight decay, batch size, weight averaging, early stopping
    and weight interpolation all tuned) on validation, and 4-6 points on the test
    split under the strong attack, with a spread over seeds of under one point.
-   The models are the weight-averaged model *before* the learning-rate anneal;
-   run to the end of an annealed schedule, the gain shrinks. The same sampler with a clean target
+   **The gain exists only for the weight-averaged model taken before the
+   learning-rate anneal.** At the end of an annealed 20-epoch schedule gradient
+   matching is roughly level with the best uniform recipe (test: 0.728 clean /
+   0.261 at 2/255, against 0.705 / 0.276 for uniform with weight interpolation). The same sampler with a clean target
    gains nothing, so the effect is the adversarial direction. It carries over to
    ResNet-20 and to BatchNorm (larger gains) and to CIFAR-100 (smaller gain).
-5. Limits. Choosing clean samples recovers about a third of the gap to real
-   adversarial training at the same radius. No variant keeps robustness at
-   8/255: with a large target radius it is gained early and lost again. The
-   sampler costs about 8x a plain training step (adversarial training: 2.4x).
+5. Limits.
+   * **Clean accuracy is capped.** With a 2/255 target the small CNN never
+     reaches 0.75 clean (0.726 at the end of training; 0.764 with a 1/255
+     target) where uniform training reaches 0.80 in the same 20 epochs and 0.84
+     in 40. ResNet-20: 0.745 against 0.856. The method buys robustness in the
+     0.60-0.75 range of clean accuracy and has nothing to offer above it.
+   * **It is far from adversarial training.** At clean 0.70, the one level where
+     the two can be matched, adversarial training at 2/255 reaches 0.54 at
+     2/255; gradient matching 0.34; the best uniform recipe 0.30. Choosing clean
+     samples closes under a fifth of that gap (18% on validation, 17% on test).
+   * **Nothing holds robustness at 8/255**: with a large target radius it is
+     gained early and lost again.
+   * **Cost**: about 8x a plain training step, against 2.4x for adversarial
+     training.
 
 ## 1. The phenomenon
 
@@ -185,14 +197,15 @@ whose clean accuracy is at least the level:
 | clean at least | uniform, default and lr 0.025 (5 seeds) | uniform, all tuning + weight interpolation (3 seeds) | **gradient matching 2/255 (5 seeds)** | gradient matching 1/255 (3 seeds) | clean-target control (2 seeds) | adversarial training 2/255 (3 seeds) |
 |---|---|---|---|---|---|---|
 | 0.55 | 0.342 | 0.342 | **0.403** | 0.384 | 0.338 | 0.541 |
-| 0.60 | 0.331 | 0.334 | **0.403** | 0.384 | 0.323 | 0.541 |
+| 0.60 | 0.331 | 0.340 | **0.403** | 0.384 | 0.323 | 0.541 |
 | 0.65 | 0.306 | 0.317 | **0.389** | 0.365 | 0.286 | 0.541 |
 | 0.70 | 0.276 | 0.297 | **0.340** | 0.343 | 0.245 | 0.540 |
 | 0.75 | 0.234 | 0.245 | not reached | **0.297** | 0.203 | not reached |
 
 "All tuning" = learning rate x0.5 and x2, weight decay 0 and 2e-3, batch 64, any
-epoch of the averaged weights, and interpolation of an early averaged model with
-the final one. Seed sd at the selected points: gradient matching 0.005-0.009,
+epoch of the averaged weights, and interpolation of an early averaged model
+(epoch 3-6) with the final one for the default and the lr 0.025 runs, the two
+best uniform variants. Seed sd at the selected points: gradient matching 0.005-0.009,
 uniform 0.009-0.028. The same holds at 4/255 (0.229 against 0.141 at clean
 >= 0.60) and for the area under the robust-accuracy curve.
 
@@ -232,8 +245,10 @@ strong PGD attack on the same points:
 | uniform 20 epochs, end | 0.805 | 0.166 | 0.149 | 0.006 | 0.005 |
 | adversarial training 2/255, end | 0.702 | 0.529 | 0.525 | 0.356 | 0.343 |
 
-AutoAttack lowers every model by 0.5-2 points and gradient matching no more
-than the others: the gain is not gradient masking. (Seed 0 is the uniform
+AutoAttack lowers every model by 0.4-2 points. For the matched pair the drop is
+0.6 (gradient matching) against 0.9 (uniform) at 2/255 and 2.0 against 1.3 at
+4/255; the ordering and the size of the gap are unchanged, so the gain is not
+gradient masking. (Seed 0 is the uniform
 recipe's best seed at epoch 6; its 3-seed mean at 2/255 is 0.280.)
 
 ### End of training (20 epochs, annealed), validation
@@ -249,8 +264,11 @@ recipe's best seed at epoch 6; its 3-seed mean at 2/255 is 0.280.)
 | adversarial training 8/255 | 3 | 0.510 +- 0.004 | 0.458 +- 0.005 | 0.400 | 0.295 |
 
 Stopping before the anneal and using the averaged weights gives the better
-models (tables above); the anneal costs gradient matching robustness as it costs
-uniform training.
+models (tables above). The anneal costs gradient matching more robustness than
+it costs uniform training: its end point (0.726 / 0.290 on validation) sits on
+the uniform recipe's frontier with interpolation (0.297 at clean >= 0.70, 0.245
+at >= 0.75) and above it only without interpolation. Note also the first
+column: gradient matching ends 3-7 points of clean accuracy below uniform.
 
 ### Other architecture, other dataset (validation, averaged weights, 2 seeds; uniform varied by epochs only)
 
@@ -302,7 +320,7 @@ adversarial training.
 ## 6. Adversarial training as the reference, and ordering under it
 
 Training on attacked inputs is far ahead of anything a choice of clean samples
-achieves (tables above). A small model underfits adversarial training:
+achieves (tables above; at clean 0.70, 0.54 at 2/255 against 0.34). A small model underfits adversarial training:
 robustness rises throughout and there is no decay to protect against. There,
 rules that speed learning up help both accuracy and robustness: class-balanced
 batches 0.539 clean / 0.483 at 2/255, and keeping the 75% of each pool with the

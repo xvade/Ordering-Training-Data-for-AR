@@ -23,11 +23,21 @@ accuracy?
   spread is under one point, the gain holds under AutoAttack, the same sampler
   aimed at the clean gradient gains nothing, and the gain carries over to
   ResNet-20, BatchNorm and CIFAR-100.
-* Data ordering alone does not replace adversarial training. Real adversarial
-  training at 2/255 reaches 0.53 at clean 0.70 on the same model. No variant
-  keeps robustness at 8/255: with a large target radius it is gained early and
-  then lost. The sampler costs about 8x a plain training step (adversarial
-  training: 2.4x).
+* Limits, stated plainly:
+  * The gain exists only for the weight-averaged model taken *before* the
+    learning-rate anneal. At the end of an annealed schedule gradient matching
+    is level with the best uniform recipe (test: 0.728 clean / 0.261, against
+    0.705 / 0.276).
+  * Clean accuracy is capped: with a 2/255 target the small CNN never reaches
+    0.75 (uniform: 0.80 in the same 20 epochs); ResNet-20 ends at 0.745 against
+    0.856.
+  * Data ordering does not replace adversarial training. At clean 0.70,
+    adversarial training at 2/255 reaches 0.53 on the same model, gradient
+    matching 0.32, uniform 0.28: under a fifth of the gap is closed.
+  * No variant keeps robustness at 8/255: with a large target radius it is
+    gained early and then lost.
+  * The sampler costs about 8x a plain training step (adversarial training:
+    2.4x).
 
 ![accuracy against robustness](results/final/frontier.png)
 
@@ -51,14 +61,19 @@ dataset.
 # uniform baseline
 python -m arorder.train --run-dir RUN --ema-decay 0.99
 
-# gradient matching: uniform for one epoch, then match the 2/255 adversarial direction
-python -m arorder.train --run-dir RUN --ema-decay 0.99 \
+# gradient matching: uniform for one epoch, then match the 2/255 adversarial direction;
+# a checkpoint (raw and averaged weights) every 351 updates = every epoch
+python -m arorder.train --run-dir RUN --ema-decay 0.99 --ckpt-every 351 \
     --sampler grad_match --pool-mult 4 --select-start-epoch 1 --sampler-args '{"eps": 2}'
+
+# the recommended model: averaged weights at epoch 9 (update 9 * 351 = 3159), before the anneal
+python -m arorder.evaluate --run-dir RUN --ckpt ckpt_003159.pt --weights ema \
+    --split test --eps 1 2 4 --autoattack
 
 # reference: real adversarial training (PGD-3 at 8/255 on every batch)
 python -m arorder.train --run-dir RUN --ema-decay 0.99 --train-eps 8
 
-# strong evaluation of a finished run (PGD-50 worst case over restarts and losses, AutoAttack)
+# strong evaluation of the end-of-training weights (PGD-50 worst case over restarts and losses, AutoAttack)
 python -m arorder.evaluate --run-dir RUN --split test --eps 1 2 4 8 --autoattack
 ```
 

@@ -34,7 +34,7 @@ archive() {  # archive NAME VARIANT_DIR(relative to $AR_RUNS) EPOCH...
 # SmallCNN, CIFAR-10. Epochs are the operating points selected on val (docs/FINDINGS.md, section 5).
 archive smallcnn_c10_gradmatch_eps2   p7_gm/gm_e2           6 9 13 14
 archive smallcnn_c10_gradmatch_eps1   p7_gm/gm_e1           5 7 11 17
-archive smallcnn_c10_uniform          p9_ref/uniform_ck     4 6 12
+archive smallcnn_c10_uniform          p9_ref/uniform_ck     3 4 6 12
 archive smallcnn_c10_uniform_lr0025   p9_ref/uni_lr0025     5 7 9 10
 archive smallcnn_c10_advtrain_eps2    p9_ref/at_e2
 archive smallcnn_c10_advtrain_eps8    p6_at_rules/at_uniform

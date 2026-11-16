@@ -686,3 +686,44 @@ family because the group fileset is at 95% of its file-count limit) to
 curves, test evaluations and the checkpoints at the selected epochs for
 gradient matching (2/255, 1/255), the uniform references, adversarial training
 (2/255, 8/255), ResNet-20 and CIFAR-100.
+
+## 2026-11-15 17:15-17:25 PST — Review corrections, last reference, archive round trip
+
+Hardware: g30xx, Quadro RTX 6000, 4 CPUs (jobs 43277089, 43277091); cpu-g2 for tables.
+
+**Corrections to earlier entries** (after an independent review of the write-up):
+
+* "Choosing clean samples recovers roughly a third of what training on attacked
+  inputs gives" (14:30-16:40 entry, B) is wrong where it matters. At clean
+  0.70, the only level where adversarial training at 2/255 is matched in clean
+  accuracy, the fraction of the uniform-to-adversarial-training gap closed is
+  (0.340 - 0.297) / (0.540 - 0.297) = 18% on validation and 0.044 / 0.25 = 17%
+  on test. A third appears only at 0.60-0.65, where the adversarially trained
+  model also has about 10 points more clean accuracy.
+* The gain belongs to the averaged model before the anneal. At the end of the
+  annealed schedule gradient matching (test 0.728 / 0.261) is level with uniform
+  plus interpolation (0.705 / 0.276).
+* Clean accuracy is capped: 2/255 target ends at 0.726 (never 0.75), 1/255 at
+  0.764, uniform 0.80 (20 epochs) to 0.84 (40); ResNet-20 0.745 against 0.856.
+* The test job `finalA` (43275689) finished at 17:10 inside its limit (the
+  previous entry said it was left to time out):
+  `results/final/test_autoattack.csv`, seed 0, 2,000 points, AutoAttack at
+  2/255: uniform 20 epochs 0.149, uniform 10 epochs 0.210, gradient matching
+  2/255 end 0.255, adversarial training 8/255 0.456 (0.268 at 8/255, PGD-50
+  0.282).
+* The BatchNorm fix's unit tests: 29 passed (log of job 43276718).
+
+**Interpolation reference on the best uniform variant** (lr 0.025, 5 seeds,
+validation, `results/final/interp_uni_lr0025_val.csv`): moves the uniform
+frontier only at clean >= 0.60 (0.334 -> 0.340); 0.297 at >= 0.70 and 0.245 at
+>= 0.75 stand (`results/final/frontier5_val_adv_acc2_interp_all.csv`). No new
+test evaluation needed.
+
+**Archive round trip**: rebuilt the archive with epoch 3 of the uniform runs
+added (the 0.70 test reference is built from it), extracted
+`smallcnn_c10_gradmatch_eps2.tar` to node-local `$TMPDIR`, deleted the cached
+evaluations and re-ran the strong test evaluation of the epoch-9 averaged
+weights from the extracted files. Seeds 0-2 reproduce the original to the digit
+(clean 0.649 / 0.653 / 0.666; 2/255 mean 0.354). With seeds 3 and 4, which were
+not in the original test table: 0.655 +- 0.007 clean, 0.358 +- 0.008 at 2/255
+(5 seeds).

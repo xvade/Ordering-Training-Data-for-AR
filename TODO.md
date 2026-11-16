@@ -12,8 +12,9 @@ Where things stand is summarised in `docs/FINDINGS.md`; every experiment is in
 ## Open decision (the user's)
 
 - [ ] Is training on attacked inputs in scope? Gradient matching trains on clean
-      samples only and recovers about a third of what adversarial training at
-      the same radius gives, at 3x its cost. If attacked inputs are allowed, the
+      samples only; at clean accuracy 0.70 it closes under a fifth of the gap
+      between uniform training and adversarial training at the same radius, at
+      3x the cost of adversarial training. If attacked inputs are allowed, the
       ordering question worth asking is the one in FINDINGS section 6 (which
       samples to attack and train on), where class-balanced batches and keeping
       the low-adversarial-margin samples already help.
